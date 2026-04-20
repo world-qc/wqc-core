@@ -1,0 +1,25 @@
+[package]
+name = "wqc-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["World Quantum Computer Contributors"]
+license = "GPL-3.0"
+
+[dependencies]
+# Numerical computing for quantum states
+ndarray = { version = "0.15", features = ["serde"] }
+num-complex = "0.4"
+# Parallel processing for memory-bound tasks
+rayon = "1.8"
+# Cryptography for PoUW (Memory-hard functions)
+argon2 = "0.5.3"
+sha3 = "0.10"
+# Utilities
+hex = "0.4"
+rand = "0.8"
+# Web server framework
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower-http = { version = "0.5", features = ["cors"] }
