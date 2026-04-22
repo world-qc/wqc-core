@@ -61,3 +61,16 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> impl IntoResponse 
         }),
     })
 }
+
+pub async fn get_supported_gates() -> Json<Vec<String>> {
+    let gates = vec![
+        "H".to_string(),
+        "X".to_string(),
+        "Y".to_string(),
+        "Z".to_string(),
+        "T".to_string(),
+        "CNOT".to_string(),
+        "CCNOT".to_string(),
+    ];
+    Json(gates)
+}
