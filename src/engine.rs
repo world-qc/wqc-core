@@ -2,24 +2,24 @@ use ndarray::Array1;
 use num_complex::Complex64;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumIter};
 
-#[derive(Clone, Debug, Serialize, Deserialize)] // Derive Serde traits
-#[serde(tag = "type", content = "params")]    // Use "adjacently tagged" for clear JSON structure
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, EnumIter, Display)]
+#[serde(tag = "type", content = "params")]
+#[strum(serialize_all = "UPPERCASE")]
 pub enum Gate {
-    #[serde(rename = "H")]
     H(usize),
-    #[serde(rename = "X")]
     X(usize),
-    #[serde(rename = "Y")]
     Y(usize),
-    #[serde(rename = "Z")]
     Z(usize),
-    #[serde(rename = "T")]
     T(usize),
-    #[serde(rename = "CNOT")]
-    CNOT(usize, usize), // (control, target)
-    #[serde(rename = "CCNOT")]
-    CCNOT(usize, usize, usize), // (control1, control2, target)
+    S(usize),
+    CNOT(usize, usize),
+    CZ(usize, usize),
+    RX(usize, f64),
+    RY(usize, f64),
+    RZ(usize, f64),
+    CCNOT(usize, usize, usize),
 }
 
 pub struct QuantumRegister {
@@ -37,75 +37,120 @@ impl QuantumRegister {
 
     pub fn apply_gate(&mut self, gate: &Gate) {
         match gate {
-            Gate::H(t) => self.apply_1q_gate(*t, [
-                Complex64::new(1.0 / 2.0f64.sqrt(), 0.0), Complex64::new(1.0 / 2.0f64.sqrt(), 0.0),
-                Complex64::new(1.0 / 2.0f64.sqrt(), 0.0), Complex64::new(-1.0 / 2.0f64.sqrt(), 0.0)
-            ]),
-            Gate::X(t) => self.apply_1q_gate(*t, [
-                Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0),
-                Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)
-            ]),
-            Gate::Y(t) => self.apply_1q_gate(*t, [
-                Complex64::new(0.0, 0.0), Complex64::new(0.0, -1.0),
-                Complex64::new(0.0, 1.0), Complex64::new(0.0, 0.0)
-            ]),
-            Gate::Z(t) => self.apply_1q_gate(*t, [
-                Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0),
-                Complex64::new(0.0, 0.0), Complex64::new(-1.0, 0.0)
-            ]),
-            Gate::T(t) => self.apply_1q_gate(*t, [
-                Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0),
-                Complex64::new(0.0, 0.0), Complex64::new(std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2)
-            ]),
-            Gate::CNOT(c, t) => self.apply_cnot(*c, *t),
-            Gate::CCNOT(c1, c2, t) => self.apply_ccnot(*c1, *c2, *t),
+            Gate::H(t) => {
+                // Hadamard gate: Creates superposition
+                let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+                self.apply_unary(*t, |v0, v1| {
+                    ((v0 + v1) * inv_sqrt2, (v0 - v1) * inv_sqrt2)
+                });
+            },
+            Gate::X(t) => {
+                // Pauli-X gate: Quantum NOT gate (swaps |0> and |1>)
+                self.apply_unary(*t, |v0, v1| (v1, v0));
+            },
+            Gate::Y(t) => {
+                // Pauli-Y gate: Rotation around Y-axis by PI
+                let i = Complex64::i();
+                self.apply_unary(*t, |v0, v1| (v1 * (-i), v0 * i));
+            },
+            Gate::Z(t) => {
+                // Pauli-Z gate: Phase flip
+                self.apply_unary(*t, |v0, v1| (v0, -v1));
+            },
+            Gate::S(t) => {
+                // S gate: Phase gate (Z^1/2), 90-degree rotation
+                let i = Complex64::i();
+                self.apply_unary(*t, |v0, v1| (v0, v1 * i));
+            },
+            Gate::T(t) => {
+                // T gate: PI/4 phase gate (Z^1/4)
+                let factor = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2);
+                self.apply_unary(*t, |v0, v1| (v0, v1 * factor));
+            },
+            Gate::CNOT(c, t) => {
+                // Controlled-NOT gate: Swaps target amplitudes if control is |1>
+                self.apply_controlled(*c, *t, |v0, v1| (v1, v0));
+            },
+            Gate::CZ(c, t) => {
+                // Controlled-Z gate: Phase flip on target if control is |1>
+                self.apply_controlled(*c, *t, |v0, v1| (v0, -v1));
+            },
+            Gate::RX(t, theta) => {
+                // Rotation around X-axis by theta
+                let (sin, cos) = (theta / 2.0).sin_cos();
+                let cos_c = Complex64::new(cos, 0.0);
+                let n_i_sin_c = Complex64::new(0.0, -sin);
+                self.apply_unary(*t, |v0, v1| {
+                    (v0 * cos_c + v1 * n_i_sin_c, v0 * n_i_sin_c + v1 * cos_c)
+                });
+            },
+            Gate::RY(t, theta) => {
+                // Rotation around Y-axis by theta
+                let (sin, cos) = (theta / 2.0).sin_cos();
+                self.apply_unary(*t, |v0, v1| {
+                    (v0 * cos - v1 * sin, v0 * sin + v1 * cos)
+                });
+            },
+            Gate::RZ(t, theta) => {
+                // Rotation around Z-axis by theta
+                let (sin, cos) = (theta / 2.0).sin_cos();
+                let exp_p = Complex64::new(cos, -sin); // e^(-i*theta/2)
+                let exp_m = Complex64::new(cos, sin);  // e^(i*theta/2)
+                self.apply_unary(*t, |v0, v1| (v0 * exp_p, v1 * exp_m));
+            },
+            Gate::CCNOT(c1, c2, t) => {
+                // Toffoli gate: Universal for classical logic
+                self.apply_ccnot(*c1, *c2, *t);
+            },
         }
     }
 
-    fn apply_1q_gate(&mut self, target: usize, matrix: [Complex64; 4]) {
-        let dim = self.state.len();
-        let dist = 1 << target;
-        let state_ptr = self.state.as_slice_mut().expect("Failed to get mutable slice");
-        let raw_ptr = state_ptr.as_mut_ptr() as usize;
+    fn apply_unary<F>(&mut self, t: usize, f: F)
+    where
+        F: Fn(Complex64, Complex64) -> (Complex64, Complex64) + Sync + Send,
+    {
+        let size = 1 << self.qubit_count;
+        let step = 1 << t;
 
-        // Parallelize loops to maximize CPU-RAM bandwidth
-        (0..(dim / (2 * dist))).into_par_iter().for_each(|i| {
-            for j in 0..dist {
-                let idx0 = i * 2 * dist + j;
-                let idx1 = idx0 + dist;
-
+        // Parallel processing of the state vector using rayon
+        (0..size).into_par_iter().step_by(step * 2).for_each(|i| {
+            for j in i..i + step {
                 unsafe {
-                    let ptr = raw_ptr as *mut Complex64;
-                    let v0 = *ptr.add(idx0);
-                    let v1 = *ptr.add(idx1);
+                    // Use raw pointers for thread-safe concurrent mutation
+                    let ptr = self.state.as_ptr() as *mut Complex64;
+                    let v0 = *ptr.add(j);
+                    let v1 = *ptr.add(j + step);
 
-                    *ptr.add(idx0) = matrix[0] * v0 + matrix[1] * v1;
-                    *ptr.add(idx1) = matrix[2] * v0 + matrix[3] * v1;
+                    let (new_v0, new_v1) = f(v0, v1);
+
+                    *ptr.add(j) = new_v0;
+                    *ptr.add(j + step) = new_v1;
                 }
             }
         });
     }
 
-    fn apply_cnot(&mut self, control: usize, target: usize) {
-        let dim = self.state.len();
-        let c_mask = 1 << control;
-        let t_mask = 1 << target;
-        let state_ptr = self.state.as_slice_mut().expect("Failed to get mutable slice");
-        let raw_ptr = state_ptr.as_mut_ptr() as usize;
+    fn apply_controlled<F>(&mut self, c: usize, t: usize, f: F)
+    where
+        F: Fn(Complex64, Complex64) -> (Complex64, Complex64) + Sync + Send,
+    {
+        let size = 1 << self.qubit_count;
+        let step_t = 1 << t;
+        let mask_c = 1 << c;
 
-        (0..dim).into_par_iter().for_each(|i| {
-            if (i & c_mask) != 0 {
-                let target_bit = (i & t_mask) != 0;
-                let flipped_idx = if target_bit { i & !t_mask } else { i | t_mask };
-
-                // Only swap once per pair
-                if i < flipped_idx {
+        (0..size).into_par_iter().step_by(step_t * 2).for_each(|i| {
+            for j in i..i + step_t {
+                // Apply transformation only if the control bit is set
+                if (j & mask_c) != 0 {
                     unsafe {
-                        let ptr = raw_ptr as *mut Complex64;
-                        let v_current = *ptr.add(i);
-                        let v_flipped = *ptr.add(flipped_idx);
-                        *ptr.add(i) = v_flipped;
-                        *ptr.add(flipped_idx) = v_current;
+                        let ptr = self.state.as_ptr() as *mut Complex64;
+                        let v0 = *ptr.add(j);
+                        let v1 = *ptr.add(j + step_t);
+
+                        let (new_v0, new_v1) = f(v0, v1);
+
+                        *ptr.add(j) = new_v0;
+                        *ptr.add(j + step_t) = new_v1;
                     }
                 }
             }
@@ -157,24 +202,28 @@ impl Circuit {
 
     /// Add a gate to the circuit
     pub fn add(&mut self, gate: Gate) {
-        // Simple safety check: ensures the gate doesn't target out-of-bounds qubits
-        match gate {
-            Gate::H(t) | Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::T(t) => {
+        // Validation: ensures all target/control qubits are within the allowed range
+        match &gate {
+            // 1-qubit gates
+            Gate::H(t) | Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::T(t) | Gate::S(t) => {
+                assert!(t < &self.qubit_count, "Target qubit index {} out of bounds", t);
+            }
+            // 1-qubit gates with parameters (Rotation gates)
+            Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => {
+                assert!(t < &self.qubit_count, "Target qubit index {} out of bounds", t);
+            }
+            // 2-qubit gates
+            Gate::CNOT(c, t) | Gate::CZ(c, t) => {
                 assert!(
-                    t < self.qubit_count,
-                    "Target qubit index out of bounds"
+                    c < &self.qubit_count && t < &self.qubit_count,
+                    "Control ({}) or Target ({}) index out of bounds", c, t
                 );
             }
-            Gate::CNOT(c, t) => {
-                assert!(
-                    c < self.qubit_count && t < self.qubit_count,
-                    "Control or Target index out of bounds"
-                );
-            }
+            // 3-qubit gates
             Gate::CCNOT(c1, c2, t) => {
                 assert!(
-                    c1 < self.qubit_count && c2 < self.qubit_count && t < self.qubit_count,
-                    "Control or Target index out of bounds"
+                    c1 < &self.qubit_count && c2 < &self.qubit_count && t < &self.qubit_count,
+                    "Control ({}, {}) or Target ({}) index out of bounds", c1, c2, t
                 );
             }
         }

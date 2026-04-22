@@ -3,6 +3,7 @@ use crate::engine::{Circuit, Gate, QuantumRegister};
 use crate::proof::Miner;
 use sha3::{Digest, Sha3_256};
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
 
 #[derive(Deserialize)]
 pub struct ComputeTask {
@@ -62,15 +63,11 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> impl IntoResponse 
     })
 }
 
+/// Dynamically returns a list of all supported gates based on the Gate enum definition.
 pub async fn get_supported_gates() -> Json<Vec<String>> {
-    let gates = vec![
-        "H".to_string(),
-        "X".to_string(),
-        "Y".to_string(),
-        "Z".to_string(),
-        "T".to_string(),
-        "CNOT".to_string(),
-        "CCNOT".to_string(),
-    ];
+    let gates = Gate::iter()
+        .map(|gate| gate.to_string()) // This now respects the UPPERCASE rule
+        .collect();
+
     Json(gates)
 }
