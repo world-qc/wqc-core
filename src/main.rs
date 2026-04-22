@@ -14,6 +14,7 @@ async fn main() {
     // 1. Setup API routes
     let app = Router::new()
         .route("/compute", post(api::handle_compute))
+        .route("/gates", axum::routing::get(api::get_supported_gates))
         // Add a health check to verify the server is alive
         .route("/health", axum::routing::get(|| async { "WQC Core is Online" }))
         .layer(CorsLayer::permissive());
