@@ -10,6 +10,7 @@ license = "GPL-3.0"
 ndarray = { version = "0.15", features = ["serde"] }
 num-complex = "0.4"
 # Parallel processing for memory-bound tasks
+sysinfo = "0.30"
 rayon = "1.8"
 # Cryptography for PoUW (Memory-hard functions)
 argon2 = "0.5.3"
