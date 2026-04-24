@@ -1,30 +1,69 @@
+use colored::*;
+use sysinfo::System;
+use std::net::SocketAddr;
+use axum::{routing::post, Router};
+use tower_http::cors::CorsLayer;
+
 mod engine;
 mod proof;
 mod api;
 
-use axum::{routing::post, Router};
-use std::net::SocketAddr;
-use tower_http::cors::CorsLayer;
-
 #[tokio::main]
 async fn main() {
-    println!("--- World Quantum Computer (WQC) Core Node ---");
-    println!("Vision: 'We are the Computer.'");
+    // --- 1. System Information Gathering ---
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+    let total_gb = sys.total_memory() / 1024 / 1024 / 1024;
+    let avail_gb = sys.available_memory() / 1024 / 1024 / 1024;
 
-    // 1. Setup API routes
+    // --- 2. Robust & Cyberpunk Startup Screen ---
+    println!("{}", "=".repeat(60).bright_blue());
+
+    let wqc_logo = r#"
+██╗    ██╗  ██████╗   ██████╗
+██║    ██║ ██╔═══██╗ ██╔════╝
+██║ █╗ ██║ ██║   ██║ ██║
+██║███╗██║ ██║▄▄ ██║ ██║
+╚███╔███╔╝ ╚██████╔╝ ╚██████╗
+ ╚══╝╚══╝   ╚══▀▀═╝   ╚═════╝ core-node
+    "#;
+    println!("{}", wqc_logo.bright_cyan().bold());
+
+    println!("  {} {}", "ID:".dimmed(), "WQC-CORE-STATION-ALPHA".bright_white());
+    println!("  {} {}", "VISION:".dimmed(), "\"We are the Computer.\"".italic().bright_magenta());
+    println!("{}", "-".repeat(60).bright_blue());
+
+    // Status Display
+    println!(
+        "  {}  {:12} {}",
+        "●".green(), "Status:".bold(), "Online".green()
+    );
+    println!(
+        "  {}  {:12} {} GB / {} GB (Available/Total)",
+        "●".blue(), "Memory:".bold(), avail_gb, total_gb
+    );
+    println!(
+        "  {}  {:12} {}",
+        "●".magenta(), "Engine:".bold(), "Hardened State-Vector".bright_blue()
+    );
+
+    // Networking info
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    println!();
+    println!("  {} {}", "➜".bright_yellow(), "API Endpoint:".bold());
+    println!("    {}", format!("http://{}", addr).underline().bright_cyan());
+    println!();
+    println!("{}", "=".repeat(60).bright_blue());
+    println!("{}", "System is ready for quantum dispatch.".dimmed());
+    println!();
+
+    // --- 3. Start Server ---
     let app = Router::new()
         .route("/compute", post(api::handle_compute))
         .route("/gates", axum::routing::get(api::get_supported_gates))
-        // Add a health check to verify the server is alive
         .route("/health", axum::routing::get(|| async { "WQC Core is Online" }))
         .layer(CorsLayer::permissive());
 
-    // 2. Define the address
-    // 0.0.0.0 is used to allow connections from outside the Docker container
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    println!("Listening on {}", addr);
-
-    // 3. Start the server
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
