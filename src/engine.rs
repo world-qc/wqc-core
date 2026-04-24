@@ -1,8 +1,36 @@
 use ndarray::Array1;
 use num_complex::Complex64;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumIter};
+use strum_macros::{EnumIter, Display};
+use sysinfo::System;
+use std::fmt;
+
+// --- Error Definitions for Robustness ---
+
+#[derive(Debug)]
+pub enum EngineError {
+    InvalidQubitCount(usize),
+    QubitIndexOutOfBounds { index: usize, limit: usize },
+    InsufficientMemory { required: u64, available: u64 },
+}
+
+impl std::error::Error for EngineError {}
+
+// Manually implement Display to handle complex error messages with values
+impl fmt::Display for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EngineError::InvalidQubitCount(c) =>
+                write!(f, "Invalid qubit count: {}. Max limit is 40.", c),
+            EngineError::QubitIndexOutOfBounds { index, limit } =>
+                write!(f, "Qubit index {} out of bounds (limit: {})", index, limit),
+            EngineError::InsufficientMemory { required, available } =>
+                write!(f, "Insufficient memory: Need {} bytes, but only {} bytes are available (80% safety threshold applied)", required, available),
+        }
+    }
+}
+
+// --- Engine Core ---
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
@@ -28,11 +56,41 @@ pub struct QuantumRegister {
 }
 
 impl QuantumRegister {
-    pub fn new(qubit_count: usize) -> Self {
+    /// Create a new QuantumRegister with dynamic memory check (Hardening)
+    pub fn new(qubit_count: usize) -> Result<Self, EngineError> {
+        // 1. Calculate required memory: (2^N) * 16 bytes (for Complex64)
+        let required_memory = (1u64 << qubit_count) * 16;
+
+        // 2. Resource check using sysinfo
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+
+        let available_memory = sys.available_memory(); // Actual free/available RAM
+        let total_memory = sys.total_memory();         // Total physical RAM
+
+        // Hardening Logic:
+        // Rule A: Must fit within 80% of CURRENTLY available memory.
+        // Rule B: Must not exceed 90% of TOTAL physical memory (to prevent OS starvation).
+        let available_threshold = (available_memory as f64 * 0.8) as u64;
+        let total_threshold = (total_memory as f64 * 0.9) as u64;
+
+        if required_memory > available_threshold || required_memory > total_threshold {
+            return Err(EngineError::InsufficientMemory {
+                required: required_memory,
+                available: available_memory,
+            });
+        }
+
+        // 3. Final safety cap to prevent accidental logic errors (e.g., 60 qubits)
+        if qubit_count == 0 || qubit_count > 40 {
+            return Err(EngineError::InvalidQubitCount(qubit_count));
+        }
+
+        // 4. Memory allocation
         let dim = 1 << qubit_count;
         let mut state = Array1::from_elem(dim, Complex64::new(0.0, 0.0));
         state[0] = Complex64::new(1.0, 0.0);
-        Self { state, qubit_count }
+        Ok(Self { state, qubit_count })
     }
 
     pub fn apply_gate(&mut self, gate: &Gate) {
@@ -188,55 +246,57 @@ impl QuantumRegister {
 }
 
 pub struct Circuit {
-    pub gates: Vec<Gate>,
     pub qubit_count: usize,
+    pub gates: Vec<Gate>,
 }
 
 impl Circuit {
     pub fn new(qubit_count: usize) -> Self {
         Self {
-            gates: Vec::new(),
             qubit_count,
+            gates: Vec::new(),
         }
     }
 
-    /// Add a gate to the circuit
-    pub fn add(&mut self, gate: Gate) {
-        // Validation: ensures all target/control qubits are within the allowed range
+    /// Add a gate to the circuit with bound checking (Replaces assert!)
+    pub fn add(&mut self, gate: Gate) -> Result<(), EngineError> {
         match &gate {
             // 1-qubit gates
             Gate::H(t) | Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::T(t) | Gate::S(t) => {
-                assert!(t < &self.qubit_count, "Target qubit index {} out of bounds", t);
+                if *t >= self.qubit_count {
+                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                }
             }
             // 1-qubit gates with parameters (Rotation gates)
             Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => {
-                assert!(t < &self.qubit_count, "Target qubit index {} out of bounds", t);
+                if *t >= self.qubit_count {
+                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                }
             }
             // 2-qubit gates
             Gate::CNOT(c, t) | Gate::CZ(c, t) => {
-                assert!(
-                    c < &self.qubit_count && t < &self.qubit_count,
-                    "Control ({}) or Target ({}) index out of bounds", c, t
-                );
+                if *c >= self.qubit_count { return Err(EngineError::QubitIndexOutOfBounds { index: *c, limit: self.qubit_count }); }
+                if *t >= self.qubit_count { return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count }); }
             }
             // 3-qubit gates
             Gate::CCNOT(c1, c2, t) => {
-                assert!(
-                    c1 < &self.qubit_count && c2 < &self.qubit_count && t < &self.qubit_count,
-                    "Control ({}, {}) or Target ({}) index out of bounds", c1, c2, t
-                );
+                if *c1 >= self.qubit_count { return Err(EngineError::QubitIndexOutOfBounds { index: *c1, limit: self.qubit_count }); }
+                if *c2 >= self.qubit_count { return Err(EngineError::QubitIndexOutOfBounds { index: *c2, limit: self.qubit_count }); }
+                if *t >= self.qubit_count { return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count }); }
             }
         }
         self.gates.push(gate);
+        Ok(())
     }
 
-    /// Execute the entire circuit on a QuantumRegister
-    pub fn execute(&self, register: &mut QuantumRegister) {
-        assert_eq!(self.qubit_count, register.qubit_count, "Circuit/Register qubit mismatch");
-
-        println!("Executing circuit with {} gates on {} qubits...", self.gates.len(), self.qubit_count);
+    /// Execute the circuit on a QuantumRegister with safety checks
+    pub fn execute(&self, register: &mut QuantumRegister) -> Result<(), String> {
+        if self.qubit_count != register.qubit_count {
+            return Err("Register/Circuit qubit count mismatch".to_string());
+        }
         for gate in &self.gates {
             register.apply_gate(gate);
         }
+        Ok(())
     }
 }

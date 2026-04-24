@@ -1,4 +1,4 @@
-use axum::{extract::Json, response::IntoResponse};
+use axum::{extract::Json, http::StatusCode};
 use crate::engine::{Circuit, Gate, QuantumRegister};
 use crate::proof::Miner;
 use sha3::{Digest, Sha3_256};
@@ -28,20 +28,28 @@ pub struct ProofData {
     pub proof_hash: String,
 }
 
-pub async fn handle_compute(Json(task): Json<ComputeTask>) -> impl IntoResponse {
-    // 1. Setup Register & Circuit
-    let mut register = QuantumRegister::new(task.qubit_count);
+pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResult>, (StatusCode, String)> {
+    // 1. Setup Register & Circuit with Error Handling (Hardening phase)
+    let mut register = QuantumRegister::new(task.qubit_count)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Engine Error: {}", e)))?;
+
     let mut circuit = Circuit::new(task.qubit_count);
     for gate in task.circuit {
-        circuit.add(gate);
+        // Validation: Return 400 Bad Request if gate indices are invalid
+        circuit.add(gate)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Circuit Validation Error: {}", e)))?;
     }
 
     // 2. Execute Quantum Computation
-    circuit.execute(&mut register);
+    circuit.execute(&mut register)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // 3. Generate State Hash (Commitment)
     let mut hasher = Sha3_256::new();
-    for val in register.state.as_slice().unwrap() {
+    let state_slice = register.state.as_slice()
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Memory layout error".to_string()))?;
+
+    for val in state_slice {
         hasher.update(val.re.to_le_bytes());
         hasher.update(val.im.to_le_bytes());
     }
@@ -49,10 +57,10 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> impl IntoResponse 
 
     // 4. Run PoUW (Mining)
     let miner = Miner::new(task.difficulty, task.memory_cost_kb);
-    let result = miner.solve(register.state.as_slice().unwrap());
+    let result = miner.solve(state_slice);
 
     // 5. Return Response
-    Json(ComputeResult {
+    Ok(Json(ComputeResult {
         task_id: task.task_id,
         status: "success".to_string(),
         state_hash,
@@ -60,7 +68,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> impl IntoResponse 
             nonce: result.nonce,
             proof_hash: result.proof_hash,
         }),
-    })
+    }))
 }
 
 /// Dynamically returns a list of all supported gates based on the Gate enum definition.

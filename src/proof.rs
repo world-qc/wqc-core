@@ -71,7 +71,7 @@ impl Validator {
         Self { difficulty, memory_cost_kb }
     }
 
-    /// Quickly verify if the provided proof is valid for the given state
+    /// Verify if the proof satisfies the specified difficulty
     pub fn verify(&self, state_vector: &[Complex64], proof: &PoUWResult) -> bool {
         // 1. Re-calculate the state hash (The commitment)
         let mut hasher = Sha3_256::new();
@@ -92,14 +92,22 @@ impl Validator {
         // 3. Check if the re-calculated hash matches and satisfies difficulty
         if let Ok(hash_output) = argon2.hash_password(&input, &salt) {
             if let Some(hash_bytes) = hash_output.hash {
-                // Check if the hash matches the one reported by the miner
+                // Hardening: Verify hash commitment
                 if hash_bytes.to_string() != proof.proof_hash {
                     return false;
                 }
-                // Check if it satisfies difficulty (first byte is 0)
-                if hash_bytes.as_bytes()[0] == 0 {
-                    return true;
+
+                // Hardening: Strict difficulty check (Leading bits must be zero)
+                let hash_data = hash_bytes.as_ref();
+                let threshold_bytes = (self.difficulty / 8) as usize;
+
+                if hash_data.len() < threshold_bytes { return false; }
+                for i in 0..threshold_bytes {
+                    if hash_data[i] != 0 { return false; }
                 }
+
+                // (Optionally handle remaining bits for fine-grained difficulty)
+                return true;
             }
         }
         false
