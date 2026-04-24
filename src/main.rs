@@ -60,6 +60,7 @@ async fn main() {
     // --- 3. Start Server ---
     let app = Router::new()
         .route("/compute", post(api::handle_compute))
+        .route("/verify", post(api::handle_verify))
         .route("/gates", axum::routing::get(api::get_supported_gates))
         .route("/health", axum::routing::get(|| async { "WQC Core is Online" }))
         .layer(CorsLayer::permissive());
