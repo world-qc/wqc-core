@@ -1,81 +1,84 @@
-use axum::{extract::Json, http::StatusCode};
-use crate::engine::{Circuit, Gate, QuantumRegister};
-use crate::proof::Miner;
-use sha3::{Digest, Sha3_256};
+use crate::engine::{QuantumRegister, Circuit};
+use crate::proof::{Miner, PoUWResult};
+use axum::{Json, response::IntoResponse, http::StatusCode};
 use serde::{Deserialize, Serialize};
-use strum::IntoEnumIterator;
+use colored::*;
+use num_complex::Complex64;
+
+// --- Existing Compute Task Structures ---
 
 #[derive(Deserialize)]
 pub struct ComputeTask {
-    pub task_id: String,
     pub qubit_count: usize,
-    pub circuit: Vec<Gate>,
+    pub circuit: Vec<crate::engine::Gate>,
     pub difficulty: u32,
     pub memory_cost_kb: u32,
 }
 
 #[derive(Serialize)]
 pub struct ComputeResult {
-    pub task_id: String,
-    pub status: String,
-    pub state_hash: String,
-    pub proof: Option<ProofData>,
+    pub state_vector: Vec<Complex64>,
+    pub proof: PoUWResult,
 }
 
-#[derive(Serialize)]
-pub struct ProofData {
-    pub nonce: u64,
-    pub proof_hash: String,
+// --- New Verification Task Structure ---
+
+#[derive(Deserialize)]
+pub struct VerifyTask {
+    pub state_vector: Vec<Complex64>,
+    pub proof: PoUWResult,
+    pub difficulty: u32,
+    pub memory_cost_kb: u32,
 }
 
+// --- Handlers ---
+
+/// PROVER ROLE: Executes quantum circuit and generates a PoUW.
 pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResult>, (StatusCode, String)> {
-    // 1. Setup Register & Circuit with Error Handling (Hardening phase)
+    // 1. Setup Register with dynamic memory guard
     let mut register = QuantumRegister::new(task.qubit_count)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Engine Error: {}", e)))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Resource Guard: {}", e)))?;
 
+    // 2. Build and Validate Circuit
     let mut circuit = Circuit::new(task.qubit_count);
     for gate in task.circuit {
-        // Validation: Return 400 Bad Request if gate indices are invalid
         circuit.add(gate)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Circuit Validation Error: {}", e)))?;
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Circuit Error: {}", e)))?;
     }
 
-    // 2. Execute Quantum Computation
+    // 3. Execution
     circuit.execute(&mut register)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // 3. Generate State Hash (Commitment)
-    let mut hasher = Sha3_256::new();
-    let state_slice = register.state.as_slice()
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Memory layout error".to_string()))?;
-
-    for val in state_slice {
-        hasher.update(val.re.to_le_bytes());
-        hasher.update(val.im.to_le_bytes());
-    }
-    let state_hash = hex::encode(hasher.finalize());
-
-    // 4. Run PoUW (Mining)
+    // 4. PoUW Generation (Mining)
     let miner = Miner::new(task.difficulty, task.memory_cost_kb);
-    let result = miner.solve(state_slice);
+    let proof = miner.solve(register.state.as_slice().unwrap());
 
-    // 5. Return Response
+    println!("{} Computed & Proof Generated (Difficulty: {})", "✔".green(), task.difficulty);
+
     Ok(Json(ComputeResult {
-        task_id: task.task_id,
-        status: "success".to_string(),
-        state_hash,
-        proof: Some(ProofData {
-            nonce: result.nonce,
-            proof_hash: result.proof_hash,
-        }),
+        state_vector: register.state.to_vec(),
+        proof,
     }))
 }
 
-/// Dynamically returns a list of all supported gates based on the Gate enum definition.
-pub async fn get_supported_gates() -> Json<Vec<String>> {
-    let gates = Gate::iter()
-        .map(|gate| gate.to_string()) // This now respects the UPPERCASE rule
-        .collect();
+/// VALIDATOR ROLE: Verifies a proof without re-executing the quantum circuit.
+pub async fn handle_verify(Json(task): Json<VerifyTask>) -> impl IntoResponse {
+    let validator = Miner::new(task.difficulty, task.memory_cost_kb);
 
+    // Perform lightweight bit-level verification
+    if validator.verify(&task.state_vector, &task.proof) {
+        println!("{} Proof verified for remote node.", "★".bright_yellow());
+        (StatusCode::OK, "Verification Successful")
+    } else {
+        println!("{} Fraudulent proof detected or difficulty too low!", "✘".red());
+        (StatusCode::FORBIDDEN, "Invalid Proof or Insufficient Difficulty")
+    }
+}
+
+/// Returns a list of supported gates for Orchestrator discovery.
+pub async fn get_supported_gates() -> Json<Vec<String>> {
+    use strum::IntoEnumIterator;
+    let gates = crate::engine::Gate::iter().map(|g| g.to_string()).collect();
     Json(gates)
 }
