@@ -1,4 +1,3 @@
-use num_complex::Complex64;
 use sha3::{Digest, Sha3_256};
 use argon2::{
     password_hash::{PasswordHasher, SaltString},
@@ -29,12 +28,13 @@ impl Miner {
     }
 
     /// Internal helper to create a deterministic commitment of the quantum state.
-    /// Changed return type to Vec<u8> to avoid complex generic type errors.
-    fn calculate_state_hash(state_vector: &[Complex64]) -> Vec<u8> {
+    /// Changed to accept &[[f64; 2]] to match the API's formatted state.
+    fn calculate_state_hash(state_vector: &[[f64; 2]]) -> Vec<u8> {
         let mut hasher = Sha3_256::new();
         for val in state_vector {
-            hasher.update(val.re.to_le_bytes());
-            hasher.update(val.im.to_le_bytes());
+            // val[0] is real, val[1] is imaginary
+            hasher.update(val[0].to_le_bytes());
+            hasher.update(val[1].to_le_bytes());
         }
         hasher.finalize().to_vec()
     }
@@ -55,7 +55,7 @@ impl Miner {
     }
 
     /// Main mining function: Find a nonce that satisfies the PoUW requirements.
-    pub fn solve(&self, state_vector: &[Complex64]) -> PoUWResult {
+    pub fn solve(&self, state_vector: &[[f64; 2]]) -> PoUWResult {
         let mut nonce = 0u64;
 
         // 1. Commit the quantum state
@@ -93,7 +93,7 @@ impl Miner {
 
     /// Verification function: Validates the work of another node.
     /// This is a lightweight operation (O(1) Argon2 execution).
-    pub fn verify(&self, state_vector: &[Complex64], proof: &PoUWResult) -> bool {
+    pub fn verify(&self, state_vector: &[[f64; 2]], proof: &PoUWResult) -> bool {
         // 1. Re-calculate state commitment
         let state_hash = Self::calculate_state_hash(state_vector);
 

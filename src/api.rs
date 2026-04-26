@@ -1,31 +1,29 @@
-use crate::engine::{QuantumRegister, Circuit};
+use crate::engine::{QuantumRegister, Circuit, Gate};
 use crate::proof::{Miner, PoUWResult};
 use axum::{Json, response::IntoResponse, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use colored::*;
-use num_complex::Complex64;
-
-// --- Existing Compute Task Structures ---
 
 #[derive(Deserialize)]
 pub struct ComputeTask {
+    pub task_id: String,
     pub qubit_count: usize,
-    pub circuit: Vec<crate::engine::Gate>,
+    pub circuit: Vec<Gate>,
     pub difficulty: u32,
     pub memory_cost_kb: u32,
 }
 
 #[derive(Serialize)]
-pub struct ComputeResult {
-    pub state_vector: Vec<Complex64>,
+pub struct ComputeResponse {
+    pub task_id: String,
+    pub status: String,
+    pub state_vector: Vec<[f64; 2]>,
     pub proof: PoUWResult,
 }
 
-// --- New Verification Task Structure ---
-
 #[derive(Deserialize)]
 pub struct VerifyTask {
-    pub state_vector: Vec<Complex64>,
+    pub state_vector: Vec<[f64; 2]>,
     pub proof: PoUWResult,
     pub difficulty: u32,
     pub memory_cost_kb: u32,
@@ -34,7 +32,7 @@ pub struct VerifyTask {
 // --- Handlers ---
 
 /// PROVER ROLE: Executes quantum circuit and generates a PoUW.
-pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResult>, (StatusCode, String)> {
+pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
     // 1. Setup Register with dynamic memory guard
     let mut register = QuantumRegister::new(task.qubit_count)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Resource Guard: {}", e)))?;
@@ -52,12 +50,17 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
 
     // 4. PoUW Generation (Mining)
     let miner = Miner::new(task.difficulty, task.memory_cost_kb);
-    let proof = miner.solve(register.state.as_slice().unwrap());
+    let raw_state = register.state.as_slice().unwrap();
+    // Convert to [re, im] format
+    let formatted_state: Vec<[f64; 2]> = raw_state.iter().map(|c| [c.re, c.im]).collect();
+    let proof = miner.solve(&formatted_state);
 
-    println!("{} Computed & Proof Generated (Difficulty: {})", "✔".green(), task.difficulty);
+    println!("{} Task {}: Computed & Proof Generated", "✔".green(), task.task_id);
 
-    Ok(Json(ComputeResult {
-        state_vector: register.state.to_vec(),
+    Ok(Json(ComputeResponse {
+        task_id: task.task_id,
+        status: "success".to_string(),
+        state_vector: formatted_state,
         proof,
     }))
 }
