@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct PoUWResult {
     pub nonce: u64,
     pub proof_hash: String,
+    pub iterations: u64,
 }
 
 pub struct Miner {
@@ -57,6 +58,7 @@ impl Miner {
     /// Main mining function: Find a nonce that satisfies the PoUW requirements.
     pub fn solve(&self, state_vector: &[[f64; 2]]) -> PoUWResult {
         let mut nonce = 0u64;
+        let mut iterations = 0u64;
 
         // 1. Commit the quantum state
         let state_hash = Self::calculate_state_hash(state_vector);
@@ -71,6 +73,7 @@ impl Miner {
 
         // 3. Iterative search for a valid nonce
         loop {
+            iterations += 1;
             let mut input = state_hash.clone();
             input.extend_from_slice(&nonce.to_le_bytes());
 
@@ -80,6 +83,7 @@ impl Miner {
                         return PoUWResult {
                             nonce,
                             proof_hash: hash_bytes.to_string(),
+                            iterations,
                         };
                     }
                 }

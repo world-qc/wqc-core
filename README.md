@@ -57,7 +57,7 @@ curl -X POST http://localhost:3000/compute \
 Verify a result from another node without re-simulating the circuit.
 
 ```bash
-curl -X POST http://localhost:8081/verify \
+curl -X POST http://localhost:3000/verify \
   -H "Content-Type: application/json" \
   -d '{
     "state_vector": [[0.707, 0.0], [0.707, 0.0], ...],
