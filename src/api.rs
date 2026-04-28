@@ -1,6 +1,6 @@
 use crate::engine::{QuantumRegister, Circuit, Gate};
 use crate::proof::{Miner, PoUWResult};
-use axum::{Json, response::IntoResponse, http::StatusCode};
+use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use colored::*;
 
@@ -27,6 +27,12 @@ pub struct VerifyTask {
     pub proof: PoUWResult,
     pub difficulty: u32,
     pub memory_cost_kb: u32,
+}
+
+#[derive(Serialize)]
+pub struct VerifyResponse {
+    pub valid: bool,
+    pub reason: Option<String>,
 }
 
 // --- Handlers ---
@@ -66,16 +72,22 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
 }
 
 /// VALIDATOR ROLE: Verifies a proof without re-executing the quantum circuit.
-pub async fn handle_verify(Json(task): Json<VerifyTask>) -> impl IntoResponse {
+pub async fn handle_verify(Json(task): Json<VerifyTask>) -> Result<Json<VerifyResponse>, (StatusCode, Json<VerifyResponse>)> {
     let validator = Miner::new(task.difficulty, task.memory_cost_kb);
 
     // Perform lightweight bit-level verification
     if validator.verify(&task.state_vector, &task.proof) {
         println!("{} Proof verified for remote node.", "★".bright_yellow());
-        (StatusCode::OK, "Verification Successful")
+        Ok(Json(VerifyResponse {
+            valid: true,
+            reason: None,
+        }))
     } else {
         println!("{} Fraudulent proof detected or difficulty too low!", "✘".red());
-        (StatusCode::FORBIDDEN, "Invalid Proof or Insufficient Difficulty")
+        Err((StatusCode::FORBIDDEN, Json(VerifyResponse {
+            valid: false,
+            reason: Some("Invalid Proof or Insufficient Difficulty".to_string()),
+        })))
     }
 }
 
