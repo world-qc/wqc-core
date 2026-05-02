@@ -1,7 +1,7 @@
 use colored::*;
 use sysinfo::System;
 use std::net::SocketAddr;
-use axum::{routing::post, Router};
+use axum::{routing::post, Router, Json};
 use tower_http::cors::CorsLayer;
 
 mod engine;
@@ -62,7 +62,7 @@ async fn main() {
         .route("/compute", post(api::handle_compute))
         .route("/verify", post(api::handle_verify))
         .route("/gates", axum::routing::get(api::get_supported_gates))
-        .route("/health", axum::routing::get(|| async { "WQC Core is Online" }))
+        .route("/health", axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }))
         .layer(CorsLayer::permissive());
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

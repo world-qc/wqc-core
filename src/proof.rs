@@ -56,7 +56,7 @@ impl Miner {
     }
 
     /// Main mining function: Find a nonce that satisfies the PoUW requirements.
-    pub fn solve(&self, state_vector: &[[f64; 2]]) -> PoUWResult {
+    pub fn solve(&self, state_vector: &[[f64; 2]]) -> Result<PoUWResult, String> {
         let mut nonce = 0u64;
         let mut iterations = 0u64;
 
@@ -65,11 +65,11 @@ impl Miner {
 
         // 2. Setup Argon2 (Memory-hard function to prevent ASIC dominance)
         let params = Params::new(self.memory_cost_kb, 3, 4, None)
-            .expect("Hardening Error: Invalid Argon2 parameters");
+            .map_err(|e| format!("Invalid Argon2 parameters: {}", e))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         // Salt is derived from the state hash itself
-        let salt = SaltString::encode_b64(&state_hash[..16]).unwrap();
+        let salt = SaltString::encode_b64(&state_hash[..16]).map_err(|e| e.to_string())?;
 
         // 3. Iterative search for a valid nonce
         loop {
@@ -80,11 +80,11 @@ impl Miner {
             if let Ok(hash_output) = argon2.hash_password(&input, &salt) {
                 if let Some(hash_bytes) = hash_output.hash {
                     if Self::check_difficulty(hash_bytes.as_ref(), self.difficulty) {
-                        return PoUWResult {
+                        return Ok(PoUWResult {
                             nonce,
                             proof_hash: hash_bytes.to_string(),
                             iterations,
-                        };
+                        });
                     }
                 }
             }
@@ -102,24 +102,33 @@ impl Miner {
         let state_hash = Self::calculate_state_hash(state_vector);
 
         // 2. Setup Argon2 with identical parameters
-        let params = Params::new(self.memory_cost_kb, 3, 4, None)
-            .expect("Hardening Error: Failed to initialize Argon2 for verification");
+        let params = match Params::new(self.memory_cost_kb, 3, 4, None) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-        let salt = SaltString::encode_b64(&state_hash[..16]).expect("Salt encoding failed");
+        let salt = match SaltString::encode_b64(&state_hash[..16]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
 
         // 3. Re-hash using the provided nonce
         let mut input = state_hash.clone();
         input.extend_from_slice(&proof.nonce.to_le_bytes());
 
-        if let Ok(hash_output) = argon2.hash_password(&input, &salt) {
-            if let Some(hash_bytes) = hash_output.hash {
-                // Verify the hash matches and difficulty is satisfied
-                let hash_str = hash_bytes.to_string();
-                return hash_str == proof.proof_hash &&
-                       Self::check_difficulty(hash_bytes.as_ref(), self.difficulty);
+        match argon2.hash_password(&input, &salt) {
+            Ok(hash_output) => {
+                if let Some(hash_bytes) = hash_output.hash {
+                    let hash_str = hash_bytes.to_string();
+                    // Verify the hash matches and difficulty is satisfied
+                    hash_str == proof.proof_hash &&
+                        Self::check_difficulty(hash_bytes.as_ref(), self.difficulty)
+                } else {
+                    false
+                }
             }
+            Err(_) => false,
         }
-        false
     }
 }
