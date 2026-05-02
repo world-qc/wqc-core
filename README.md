@@ -82,7 +82,10 @@ Execute a quantum circuit and generate a cryptographic proof of work.
   }
 }
 ```
-> **Audit Logic**: The Orchestrator expects `iterations` to be statistically close to $2^{difficulty}$. If `iterations` is consistently too low, the node may be flagged for potential pre-computation attacks or fraudulent reporting.
+> **Statistical Audit Logic**:
+> The Orchestrator leverages the `iterations` field to perform probabilistic integrity checks. Since finding a valid PoUW nonce is a Bernoulli process, the expected number of iterations is $E[X] = 2^{difficulty}$.
+> - **Inclusion Rule**: Nodes must report `iterations` to allow the network to calculate the real-time **Hash Rate** ($H/s = \frac{iterations}{execution\_time}$).
+> - **Fraud Detection**: If a node consistently reports successful proofs with `iterations` significantly lower than $2^{difficulty}$, it will be flagged for "Pre-computation Attack" or "Fraudulent Reporting" and may be jailed or slashed.
 
 ---
 
@@ -113,10 +116,21 @@ Audit a computation result submitted by another node. This is a stateless, high-
 
 ---
 
-## Requirements
+### Error Handling & Reliability
+`wqc-core` implements strict resource guarding to ensure node stability.
+
+| HTTP Code | Situation | Description |
+| :--- | :--- | :--- |
+| `400 Bad Request` | Invalid Parameters | Triggered if `memory_cost_kb` is below the absolute minimum (8 KiB) or qubit indices are out of bounds. |
+| `403 Forbidden` | Verification Failed | Triggered during `/verify` if the state hash does not match the proof or the difficulty requirement is not met. |
+| `503 Service Unavailable` | Resource Busy | **Crucial for Orchestrators**: Triggered when the requested task exceeds 70% of the currently available system memory. The Orchestrator should re-route the task to another node. |
+
+## Requirements & Security Policy
 - **Rust**: 1.95+
 - **Memory**: 16GB+ RAM (32GB+ recommended for >29 Qubits)
+- **Memory Hardening**: While the absolute minimum `memory_cost_kb` is 8 KiB, the WQC network **recommends a minimum of 15,360 KiB (15 MiB)** for production-level ASIC resistance.
 - **Dependencies**: num-complex (with serde feature), argon2, sha3
+- **Concurrency**: The node automatically manages concurrency based on real-time RAM availability. Large-scale simulations (e.g., >29 Qubits) will lock the resource until completion to prevent OOM panics.
 
 ## License
 Distributed under the GNU General Public License v3.0 (GPLv3). See `LICENSE` for more information.
