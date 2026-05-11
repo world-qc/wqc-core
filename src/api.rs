@@ -7,16 +7,18 @@ use sysinfo::System;
 
 const MIN_ARGON2_KB: u32 = 8;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ComputeTask {
     pub task_id: String,
     pub qubit_count: usize,
+    pub original_qubit_count: usize,
+    pub global_offset: String,
     pub circuit: Vec<Gate>,
     pub difficulty: u32,
     pub memory_cost_kb: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ComputeResponse {
     pub task_id: String,
     pub status: String,
@@ -24,7 +26,7 @@ pub struct ComputeResponse {
     pub proof: PoUWResult,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct VerifyTask {
     pub state_vector: Vec<[f64; 2]>,
     pub proof: PoUWResult,
@@ -32,7 +34,7 @@ pub struct VerifyTask {
     pub memory_cost_kb: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct VerifyResponse {
     pub valid: bool,
     pub reason: Option<String>,
@@ -42,6 +44,14 @@ pub struct VerifyResponse {
 
 /// PROVER ROLE: Executes quantum circuit and generates a PoUW.
 pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
+    println!(
+        "{} Processing slice {} of {} qubits task {:#?}",
+        "⚙".bright_blue(),
+        task.global_offset,
+        task.original_qubit_count,
+        task
+    );
+
     // 1. Validation: Check Argon2 parameters
     if task.memory_cost_kb < MIN_ARGON2_KB {
         return Err((StatusCode::BAD_REQUEST, format!("memory_cost_kb must be at least {} KB", MIN_ARGON2_KB)));
