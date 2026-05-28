@@ -1,21 +1,18 @@
 use crate::engine::{QuantumRegister, Circuit, Gate};
-use crate::proof::{Miner, PoUWResult};
+use crate::proof::{StarkProver, Proof};
 use axum::{Json, http::StatusCode};
 use colored::*;
 use serde::{Deserialize, Serialize};
-use sysinfo::System;
-
-const MIN_ARGON2_KB: u32 = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct ComputeTask {
     pub task_id: String,
+    pub circuit_id: String,
+    pub node_id: String,
     pub qubit_count: usize,
     pub original_qubit_count: usize,
     pub global_offset: String,
     pub circuit: Vec<Gate>,
-    pub difficulty: u32,
-    pub memory_cost_kb: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,15 +20,12 @@ pub struct ComputeResponse {
     pub task_id: String,
     pub status: String,
     pub state_vector: Vec<[f64; 2]>,
-    pub proof: PoUWResult,
+    pub proof: Proof,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct VerifyTask {
-    pub state_vector: Vec<[f64; 2]>,
-    pub proof: PoUWResult,
-    pub difficulty: u32,
-    pub memory_cost_kb: u32,
+pub struct VerifyProof {
+    pub proof: Proof,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,60 +36,60 @@ pub struct VerifyResponse {
 
 // --- Handlers ---
 
-/// PROVER ROLE: Executes quantum circuit and generates a PoUW.
+/// PROVER ROLE: Executes quantum circuit, captures execution trace, and generates an algebraic zk-STARK proof.
 pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
     println!(
-        "{} Processing slice {} of {} qubits task {:#?}",
-        "⚙".bright_blue(),
-        task.global_offset,
-        task.original_qubit_count,
-        task
+        "{} Processing STARK-monitored task {} on Node {} with {} qubits...",
+        "⚙".bright_cyan(),
+        task.task_id.bright_yellow(),
+        task.node_id.bright_green(),
+        task.qubit_count
     );
 
-    // 1. Validation: Check Argon2 parameters
-    if task.memory_cost_kb < MIN_ARGON2_KB {
-        return Err((StatusCode::BAD_REQUEST, format!("memory_cost_kb must be at least {} KB", MIN_ARGON2_KB)));
-    }
+    // 1. Initialize Quantum Register via memory limits configuration
+    let mut register = match QuantumRegister::new(task.qubit_count) {
+        Ok(reg) => reg,
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
+    };
 
-    // 2. Pre-check memory capacity
-    // Determine if the task can be accepted by checking current system-wide available memory before allocation.
-    let required_memory = (1u64 << task.qubit_count) * 16;
-    let mut sys = System::new_all();
-    sys.refresh_memory();
-
-    // Apply a safety factor of 0.7 (70%) to protect other processes and the OS.
-    let safe_available = (sys.available_memory() as f64 * 0.7) as u64;
-
-    if required_memory > safe_available {
-        println!("{} Task {} rejected: Memory busy (Required: {}MB, Available Safe: {}MB)",
-            "⚠".yellow(), task.task_id, required_memory/1024/1024, safe_available/1024/1024);
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "Node is busy: Insufficient memory for this task size".into()));
-    }
-
-    // 3. Setup Register with dynamic memory guard
-    let mut register = QuantumRegister::new(task.qubit_count)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Resource Guard: {}", e)))?;
-
-    // 4. Build and Validate Circuit
+    // 2. Build circuit instruction matrices
     let mut circuit = Circuit::new(task.qubit_count);
     for gate in task.circuit {
-        circuit.add(gate)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Circuit Error: {}", e)))?;
+        if let Err(e) = circuit.add(gate) {
+            return Err((StatusCode::BAD_REQUEST, e.to_string()));
+        }
     }
 
-    // 5. Execution
-    circuit.execute(&mut register)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // 3. Execute while extracting raw polynomial execution traces
+    let execution_trace = match circuit.execute_with_trace(&mut register) {
+        Ok(trace) => trace,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
 
-    // 6. PoUW Generation (Mining)
-    let miner = Miner::new(task.difficulty, task.memory_cost_kb);
-    let raw_state = register.state.as_slice().unwrap();
-    // Convert to [re, im] format
-    let formatted_state: Vec<[f64; 2]> = raw_state.iter().map(|c| [c.re, c.im]).collect();
-    let proof = miner.solve(&formatted_state)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // 4. Format memory states back to structured float pairs
+    let formatted_state: Vec<[f64; 2]> = register
+        .state
+        .iter()
+        .map(|c| [c.re, c.im])
+        .collect();
 
-    println!("{} Task {}: Computed & Proof Generated", "✔".green(), task.task_id);
+    // 5. Generate the real state hash commitment from the computed state vector
+    let generated_output_hash = calculate_output_hash(&formatted_state);
+
+    // 6. Generate Plonky3 zk-STARK proof transcript over Mersenne31 prime field
+    let prover = StarkProver;
+    let proof = match prover.generate_proof(
+        &task.circuit_id,
+        &task.task_id,
+        &task.node_id,
+        &generated_output_hash,
+        &execution_trace,
+    ) {
+        Ok(p) => p,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+
+    println!("{} STARK Proof generated successfully for Task: {}", "✔".green(), task.task_id.bright_yellow());
 
     Ok(Json(ComputeResponse {
         task_id: task.task_id,
@@ -105,30 +99,21 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
     }))
 }
 
-/// VALIDATOR ROLE: Verifies a proof without re-executing the quantum circuit.
-pub async fn handle_verify(Json(task): Json<VerifyTask>) -> Result<Json<VerifyResponse>, (StatusCode, Json<VerifyResponse>)> {
-    // 1. Validation
-    if task.memory_cost_kb < MIN_ARGON2_KB {
-        return Err((StatusCode::BAD_REQUEST, Json(VerifyResponse {
-            valid: false,
-            reason: Some(format!("Invalid parameter: memory_cost_kb must be at least {}", MIN_ARGON2_KB)),
-        })));
-    }
-
-    let validator = Miner::new(task.difficulty, task.memory_cost_kb);
-
-    // Perform lightweight bit-level verification
-    if validator.verify(&task.state_vector, &task.proof) {
-        println!("{} Proof verified for remote node.", "★".bright_yellow());
+/// VALIDATOR ROLE: Instantly verifies a zk-STARK proof without re-executing any quantum state transformations.
+pub async fn handle_verify(Json(proof): Json<VerifyProof>) -> Result<Json<VerifyResponse>, (StatusCode, Json<VerifyResponse>)> {
+    // Stateless verification bounding the public inputs (circuit_id, task_id, output_hash)
+    let validator = StarkProver;
+    if validator.verify_proof(&proof.proof) {
+        println!("{} zk-STARK Proof verified instantly for remote node.", "★".bright_yellow());
         Ok(Json(VerifyResponse {
             valid: true,
             reason: None,
         }))
     } else {
-        println!("{} Fraudulent proof detected or difficulty too low!", "✘".red());
+        println!("{} Fraudulent zk-STARK proof or polynomial mismatch detected!", "✘".red());
         Err((StatusCode::FORBIDDEN, Json(VerifyResponse {
             valid: false,
-            reason: Some("Invalid Proof or Insufficient Difficulty".to_string()),
+            reason: Some("Invalid zk-STARK Transcript Alignment".to_string()),
         })))
     }
 }
@@ -138,4 +123,15 @@ pub async fn get_supported_gates() -> Json<Vec<String>> {
     use strum::IntoEnumIterator;
     let gates = crate::engine::Gate::iter().map(|g| g.to_string()).collect();
     Json(gates)
+}
+
+/// Helper function to generate a deterministic output hash for the state vector
+fn calculate_output_hash(state_vector: &[[f64; 2]]) -> String {
+    use sha3::{Digest, Sha3_256};
+    let mut hasher = Sha3_256::new();
+    for [real, imag] in state_vector {
+        hasher.update(real.to_le_bytes());
+        hasher.update(imag.to_le_bytes());
+    }
+    hex::encode(hasher.finalize())
 }

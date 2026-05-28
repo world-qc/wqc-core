@@ -1,134 +1,101 @@
-use sha3::{Digest, Sha3_256};
-use argon2::{
-    password_hash::{PasswordHasher, SaltString},
-    Argon2, Algorithm, Version, Params,
-};
 use serde::{Deserialize, Serialize};
+use wqc_stark_engine::{generate_stark_proof, verify_stark_proof_core, StarkContext as EngineContext};
+use base64::{Engine as _, engine::general_purpose};
 
 /// Vision: 'The proof is the anchor of trust in a decentralized computer.'
-/// PoUW (Proof of Useful Work) result structure.
+/// STARK-based PoUW proof token payload.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PoUWResult {
-    pub nonce: u64,
-    pub proof_hash: String,
-    pub iterations: u64,
+pub struct Proof {
+    pub public_inputs: PublicInputs,
+    pub stark_proof_b64: String,
 }
 
-pub struct Miner {
-    pub difficulty: u32,
-    pub memory_cost_kb: u32,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PublicInputs {
+    pub circuit_id: String,
+    pub sub_task_id: String,
+    pub node_id: String,
+    pub output_result_hash: String,
 }
 
-impl Miner {
-    /// Initialize a new Miner with network difficulty parameters.
-    pub fn new(difficulty: u32, memory_cost_kb: u32) -> Self {
-        Self {
-            difficulty,
-            memory_cost_kb,
+pub struct StarkProver;
+
+impl StarkProver {
+    /// PROVER ROLE: Pipes the flattened f64 execution trace stream directly
+    /// into the Plonky3 Mersenne31 AIR constraint calculator.
+    pub fn generate_proof(
+        &self,
+        circuit_id: &str,
+        task_id: &str,
+        node_id: &str,
+        output_hash: &str,
+        execution_trace: &[f64],
+    ) -> Result<Proof, String> {
+        if execution_trace.is_empty() {
+            return Err("Cannot generate STARK proof: Execution trace stream is empty.".to_string());
         }
-    }
 
-    /// Internal helper to create a deterministic commitment of the quantum state.
-    /// Changed to accept &[[f64; 2]] to match the API's formatted state.
-    fn calculate_state_hash(state_vector: &[[f64; 2]]) -> Vec<u8> {
-        let mut hasher = Sha3_256::new();
-        for val in state_vector {
-            // val[0] is real, val[1] is imaginary
-            hasher.update(val[0].to_le_bytes());
-            hasher.update(val[1].to_le_bytes());
-        }
-        hasher.finalize().to_vec()
-    }
-
-    /// Check if the hash satisfies the bit-level difficulty requirement.
-    /// 'difficulty' represents the required number of leading zero bits.
-    pub fn check_difficulty(hash_bytes: &[u8], difficulty: u32) -> bool {
-        let mut total_leading_zeros = 0;
-        for &byte in hash_bytes {
-            let zeros = byte.leading_zeros();
-            total_leading_zeros += zeros;
-            if zeros < 8 {
-                // Stop at the first non-zero bit found in the current byte
-                break;
-            }
-        }
-        total_leading_zeros >= difficulty
-    }
-
-    /// Main mining function: Find a nonce that satisfies the PoUW requirements.
-    pub fn solve(&self, state_vector: &[[f64; 2]]) -> Result<PoUWResult, String> {
-        let mut nonce = 0u64;
-        let mut iterations = 0u64;
-
-        // 1. Commit the quantum state
-        let state_hash = Self::calculate_state_hash(state_vector);
-
-        // 2. Setup Argon2 (Memory-hard function to prevent ASIC dominance)
-        let params = Params::new(self.memory_cost_kb, 3, 4, None)
-            .map_err(|e| format!("Invalid Argon2 parameters: {}", e))?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
-        // Salt is derived from the state hash itself
-        let salt = SaltString::encode_b64(&state_hash[..16]).map_err(|e| e.to_string())?;
-
-        // 3. Iterative search for a valid nonce
-        loop {
-            iterations += 1;
-            let mut input = state_hash.clone();
-            input.extend_from_slice(&nonce.to_le_bytes());
-
-            if let Ok(hash_output) = argon2.hash_password(&input, &salt) {
-                if let Some(hash_bytes) = hash_output.hash {
-                    if Self::check_difficulty(hash_bytes.as_ref(), self.difficulty) {
-                        return Ok(PoUWResult {
-                            nonce,
-                            proof_hash: hash_bytes.to_string(),
-                            iterations,
-                        });
-                    }
-                }
-            }
-            nonce += 1;
-
-            // Safety: In a real production environment, you would check
-            // for cancellation tokens or timeouts here.
-        }
-    }
-
-    /// Verification function: Validates the work of another node.
-    /// This is a lightweight operation (O(1) Argon2 execution).
-    pub fn verify(&self, state_vector: &[[f64; 2]], proof: &PoUWResult) -> bool {
-        // 1. Re-calculate state commitment
-        let state_hash = Self::calculate_state_hash(state_vector);
-
-        // 2. Setup Argon2 with identical parameters
-        let params = match Params::new(self.memory_cost_kb, 3, 4, None) {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
-        let salt = match SaltString::encode_b64(&state_hash[..16]) {
-            Ok(s) => s,
-            Err(_) => return false,
+        // Bridge the task credentials using the real Engine's structural layout
+        let context = EngineContext {
+            circuit_id,
+            sub_task_id: task_id,
+            node_id,
+            output_hash,
         };
 
-        // 3. Re-hash using the provided nonce
-        let mut input = state_hash.clone();
-        input.extend_from_slice(&proof.nonce.to_le_bytes());
-
-        match argon2.hash_password(&input, &salt) {
-            Ok(hash_output) => {
-                if let Some(hash_bytes) = hash_output.hash {
-                    let hash_str = hash_bytes.to_string();
-                    // Verify the hash matches and difficulty is satisfied
-                    hash_str == proof.proof_hash &&
-                        Self::check_difficulty(hash_bytes.as_ref(), self.difficulty)
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
+        // Execution of the real Plonky3 multi-poly row transformation
+        let proof_bytes = generate_stark_proof(&context, execution_trace);
+        if proof_bytes.is_empty() {
+            return Err("STARK Prover runtime error: Generated empty proof transcript.".to_string());
         }
+
+        let stark_proof_b64: String = general_purpose::STANDARD.encode(&proof_bytes);
+
+        Ok(Proof {
+            public_inputs: PublicInputs {
+                circuit_id: circuit_id.to_string(),
+                sub_task_id: task_id.to_string(),
+                node_id: node_id.to_string(),
+                output_result_hash: output_hash.to_string(),
+            },
+            stark_proof_b64,
+        })
+    }
+
+    /// VALIDATOR ROLE: Executes stateless validation of the remote node's proof transcript.
+    /// This avoids execution trace tracking and handles validation instantly in O(1).
+    pub fn verify_proof(
+        &self,
+        proof: &Proof,
+    ) -> bool {
+        let fields = [
+            &proof.public_inputs.circuit_id,
+            &proof.public_inputs.sub_task_id,
+            &proof.public_inputs.node_id,
+            &proof.public_inputs.output_result_hash,
+            &proof.stark_proof_b64,
+        ];
+        if fields.iter().all(|s| s.is_empty()) {
+            return false;
+        }
+
+        let mut result = false;
+        match general_purpose::STANDARD.decode(proof.stark_proof_b64.clone()) {
+            Ok(proof_bytes) => {
+                // Reconstruct context mapping to mirror Orchestrator verification pipelines
+                let context = EngineContext {
+                    circuit_id: &proof.public_inputs.circuit_id,
+                    sub_task_id: &proof.public_inputs.sub_task_id,
+                    node_id: &proof.public_inputs.node_id,
+                    output_hash: &proof.public_inputs.output_result_hash,
+                };
+                // Call the real stateless AIR evaluation pathway from wqc-stark-engine
+                result = verify_stark_proof_core(&context, &proof_bytes);
+            }
+            Err(e) => {
+                println!("Decode failed: Invalid Base64: {}", e);
+            }
+        }
+        return result;
     }
 }
