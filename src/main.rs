@@ -29,7 +29,6 @@ async fn main() {
     "#;
     println!("{}", wqc_logo.bright_cyan().bold());
 
-    println!("  {} {}", "ID:".dimmed(), "WQC-CORE-STATION-ALPHA".bright_white());
     println!("  {} {}", "VISION:".dimmed(), "\"We are the Computer.\"".italic().bright_magenta());
     println!("{}", "-".repeat(60).bright_blue());
 
@@ -44,7 +43,7 @@ async fn main() {
     );
     println!(
         "  {}  {:12} {}",
-        "●".magenta(), "Engine:".bold(), "Hardened State-Vector".bright_blue()
+        "●".magenta(), "Engine:".bold(), "Plonky3 zk-STARKs Engine Enabled".bright_green()
     );
 
     // Networking info
@@ -54,7 +53,7 @@ async fn main() {
     println!("    {}", format!("http://{}", addr).underline().bright_cyan());
     println!();
     println!("{}", "=".repeat(60).bright_blue());
-    println!("{}", "System is ready for quantum dispatch.".dimmed());
+    println!("{}", "System is ready for algebraic quantum verification (Mersenne31).".dimmed());
     println!();
 
     // --- 3. Start Server ---

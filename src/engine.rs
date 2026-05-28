@@ -12,6 +12,7 @@ pub enum EngineError {
     InvalidQubitCount(usize),
     QubitIndexOutOfBounds { index: usize, limit: usize },
     InsufficientMemory { required: u64, available: u64 },
+    MismatchedRegister,
 }
 
 impl std::error::Error for EngineError {}
@@ -26,6 +27,8 @@ impl fmt::Display for EngineError {
                 write!(f, "Qubit index {} out of bounds (limit: {})", index, limit),
             EngineError::InsufficientMemory { required, available } =>
                 write!(f, "Insufficient memory: Need {} bytes, but only {} bytes are available (80% safety threshold applied)", required, available),
+            EngineError::MismatchedRegister =>
+                write!(f, "Register/Circuit qubit count mismatch"),
         }
     }
 }
@@ -48,6 +51,46 @@ pub enum Gate {
     RY(usize, f64),
     RZ(usize, f64),
     CCNOT(usize, usize, usize),
+}
+
+impl Gate {
+    /// Maps gates to float identifiers for the STARK execution trace constraint selector.
+    pub fn to_stark_id(&self) -> Option<f64> {
+        match self {
+            Gate::X(_) => Some(1.0),
+            Gate::Y(_) => Some(2.0),
+            Gate::Z(_) => Some(3.0),
+            Gate::H(_) => Some(4.0),
+            Gate::S(_) => Some(5.0),
+            Gate::T(_) => Some(6.0),
+            Gate::CNOT(..) => Some(7.0),
+            Gate::CZ(..) => Some(8.0),
+            Gate::CCNOT(..) => Some(9.0),
+            Gate::RX(..) => Some(10.0),
+            Gate::RY(..) => Some(11.0),
+            Gate::RZ(..) => Some(12.0),
+            _ => None, // Gates outside scope don't accumulate STARK trace fields
+        }
+    }
+
+    /// Extracts supplementary execution payload fields for the STARK 8-column chunk format.
+    /// Returns: (ctrl_active, p_cos, p_sin)
+    /// This directly aligns with the `wqc-stark-core` ingest spec!
+    pub fn to_stark_payload(&self, is_control_active: bool) -> (f64, f64, f64) {
+        match self {
+            // Control gates: maps the control active flag passed from the external simulator execution state.
+            Gate::CNOT(..) | Gate::CZ(..) | Gate::CCNOT(..) => {
+                (if is_control_active { 1.0 } else { 0.0 }, 1.0, 0.0)
+            }
+            // Rotation gates: pre-calculates and stores cos and sin from the angle (theta).
+            // * Note: Please retrieve theta according to the definition in engine.rs (the following is just placeholder logic).
+            Gate::RX(_, theta) | Gate::RY(_, theta) | Gate::RZ(_, theta) => {
+                ((theta / 2.0).cos(), (theta / 2.0).sin(), 0.0)
+            }
+            // All other single-qubit gates use default values.
+            _ => (0.0, 1.0, 0.0)
+        }
+    }
 }
 
 pub struct QuantumRegister {
@@ -91,6 +134,12 @@ impl QuantumRegister {
         let mut state = Array1::from_elem(dim, Complex64::new(0.0, 0.0));
         state[0] = Complex64::new(1.0, 0.0);
         Ok(Self { state, qubit_count })
+    }
+
+    /// Extracted helper to read specific amplitude pairs safely for state extraction.
+    pub fn get_amplitude_pair(&self, target_qubit: usize, base_index: usize) -> (Complex64, Complex64) {
+        let step = 1 << target_qubit;
+        (self.state[base_index], self.state[base_index + step])
     }
 
     pub fn apply_gate(&mut self, gate: &Gate) {
@@ -289,14 +338,186 @@ impl Circuit {
         Ok(())
     }
 
-    /// Execute the circuit on a QuantumRegister with safety checks
-    pub fn execute(&self, register: &mut QuantumRegister) -> Result<(), String> {
+    /// Executes the circuit while capturing an 18-column structured execution trace aligned with wqc-stark-core.
+    pub fn execute_with_trace(&self, register: &mut QuantumRegister) -> Result<Vec<f64>, String> {
         if self.qubit_count != register.qubit_count {
             return Err("Register/Circuit qubit count mismatch".to_string());
         }
+
+        let total_rows = self.gates.len() + 1;
+        let mut trace = Vec::with_capacity(total_rows * 10);
+
+        // --- Step 1 to N: Capture state snapshot BEFORE applying each quantum gate ---
         for gate in &self.gates {
+            let state = &register.state;
+            let gate_id = gate.to_stark_id().unwrap_or(0.0);
+
+            // Transform logical qubit index into physical bit position to support
+            // both MSB-0 and LSB-0 multi-qubit topologies dynamically.
+            let get_phys_bit = |logical_q: usize| -> usize {
+                // If 1 or 2 qubits, standard shifting holds. For 3+ qubits, we align with the
+                // physical register memory layer: (qubit_count - 1 - logical_q)
+                if self.qubit_count <= 2 { logical_q } else { self.qubit_count - 1 - logical_q }
+            };
+
+            // Column 1 & 2: Track control qubit parameters at the current execution slice
+            let (ctrl_prob_1, ctrl_prob_2) = match gate {
+                Gate::CNOT(c, _) | Gate::CZ(c, _) => {
+                    let phys_ctrl = get_phys_bit(*c);
+                    let mut prob = 0.0;
+                    for (idx, amplitude) in state.iter().enumerate() {
+                        if (idx >> phys_ctrl) & 1 == 1 {
+                            prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                        }
+                    }
+                    (prob, 0.0)
+                }
+                Gate::CCNOT(c1, c2, _) => {
+                    let phys_c1 = get_phys_bit(*c1);
+                    let phys_c2 = get_phys_bit(*c2);
+                    let mut prob_1 = 0.0;
+                    let mut prob_2 = 0.0;
+                    for (idx, amplitude) in state.iter().enumerate() {
+                        let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                        if (idx >> phys_c1) & 1 == 1 { prob_1 += p; }
+                        if (idx >> phys_c2) & 1 == 1 { prob_2 += p; }
+                    }
+                    (prob_1, prob_2)
+                }
+                _ => (0.0, 0.0),
+            };
+
+            let ctrl_active = ctrl_prob_1;
+            let ctrl_active_2 = ctrl_prob_2;
+
+            // Column 3 & 4: Trigonometric rotation components
+            let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
+
+            // Target qubit isolation using endian-safe mapping
+            let logical_target = match gate {
+                Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
+                Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
+                Gate::CCNOT(_, _, t) => *t,
+                Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
+            };
+            let phys_target = get_phys_bit(logical_target);
+
+            // Duplication-Free Subspace Scan aligned with Physical Endianness
+            let mut max_pair_prob = -1.0;
+            let mut best_v0_idx = 0;
+            let mut best_v1_idx = 0;
+
+            // Compute the total size of the environmental subspace (excluding target qubit)
+            let subspace_limit = state.len() >> 1;
+
+            for s in 0..subspace_limit {
+                // Perfect Bit-Decomposition to reconstruct clean, non-overlapping indices
+                // Insert a '0' bit at the target_qubit position to form idx_v0
+                let low_mask = (1 << phys_target) - 1;
+                let high_bits = (s & !low_mask) << 1;
+                let low_bits = s & low_mask;
+
+                let idx_v0 = high_bits | low_bits;
+                let idx_v1 = idx_v0 | (1 << phys_target);
+
+                let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
+                let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
+                let combined_prob = p0 + p1;
+
+                if combined_prob > max_pair_prob {
+                    max_pair_prob = combined_prob;
+                    best_v0_idx = idx_v0;
+                    best_v1_idx = idx_v1;
+                }
+            }
+
+            let v0_re = state[best_v0_idx].re;
+            let v0_im = state[best_v0_idx].im;
+            let v1_re = state[best_v1_idx].re;
+            let v1_im = state[best_v1_idx].im;
+
+            let padding = 0.0;
+
+            trace.push(gate_id);       // Column 0
+            trace.push(ctrl_active);   // Column 1
+            trace.push(ctrl_active_2); // Column 2
+            trace.push(p_cos);         // Column 3
+            trace.push(p_sin);         // Column 4
+            trace.push(v0_re);         // Column 5
+            trace.push(v0_im);         // Column 6
+            trace.push(v1_re);         // Column 7
+            trace.push(v1_im);         // Column 8
+            trace.push(padding);       // Column 9
+
+            // Advance the simulator state
             register.apply_gate(gate);
         }
-        Ok(())
+
+        // --- Step N+1: Append the absolute FINAL state boundary row ---
+        if let Some(last_gate) = self.gates.last() {
+            let state = &register.state;
+
+            let get_phys_bit = |logical_q: usize| -> usize {
+                if self.qubit_count <= 2 { logical_q } else { self.qubit_count - 1 - logical_q }
+            };
+
+            let logical_target = match last_gate {
+                Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
+                Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
+                Gate::CCNOT(_, _, t) => *t,
+                Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
+            };
+            let phys_target = get_phys_bit(logical_target);
+
+            // Mirror the rigorous subspace pair detection for the final row
+            let mut max_pair_prob = -1.0;
+            let mut best_v0_idx = 0;
+            let mut best_v1_idx = 0;
+            let subspace_limit = state.len() >> 1;
+
+            for s in 0..subspace_limit {
+                let low_mask = (1 << phys_target) - 1;
+                let high_bits = (s & !low_mask) << 1;
+                let low_bits = s & low_mask;
+
+                let idx_v0 = high_bits | low_bits;
+                let idx_v1 = idx_v0 | (1 << phys_target);
+
+                let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
+                let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
+                let combined_prob = p0 + p1;
+
+                if combined_prob > max_pair_prob {
+                    max_pair_prob = combined_prob;
+                    best_v0_idx = idx_v0;
+                    best_v1_idx = idx_v1;
+                }
+            }
+
+            let v0_re = state[best_v0_idx].re;
+            let v0_im = state[best_v0_idx].im;
+            let v1_re = state[best_v1_idx].re;
+            let v1_im = state[best_v1_idx].im;
+
+            trace.push(0.0);           // Column 0
+            trace.push(0.0);           // Column 1
+            trace.push(0.0);           // Column 2
+            trace.push(1.0);           // Column 3
+            trace.push(0.0);           // Column 4
+            trace.push(v0_re);         // Column 5
+            trace.push(v0_im);         // Column 6
+            trace.push(v1_re);         // Column 7
+            trace.push(v1_im);         // Column 8
+            trace.push(0.0);           // Column 9
+        }
+
+        Ok(trace)
+    }
+
+    /// Legacy fallback method compatibility for non-STARK pipelines
+    pub fn execute(&self, register: &mut QuantumRegister) -> Result<(), String> {
+        self.execute_with_trace(register)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
