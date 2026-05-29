@@ -450,20 +450,11 @@ impl Circuit {
         // --- Step N+1: Append the absolute FINAL state boundary row ---
         // The final trace row validates the terminal register boundary conditions.
         // We lock the physical reference bit to 0 to eliminate any dependency on the last gate type.
-        if let Some(last_gate) = self.gates.last() {
+        if !self.gates.is_empty() {
             let state = &register.state;
 
-            let get_phys_bit = |logical_q: usize| -> usize {
-                if self.qubit_count <= 2 { logical_q } else { 3 - 1 - logical_q }
-            };
-
-            let logical_target = match last_gate {
-                Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
-                Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
-                Gate::CCNOT(_, _, t) => *t,
-                Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-            };
-            let phys_target = get_phys_bit(logical_target);
+            // 🎯 last_gate の match を完全撤廃し、物理ビット 0 に固定
+            let phys_target = 0;
 
             let mut max_pair_prob = -1.0;
             let mut best_v0_idx = 0;
