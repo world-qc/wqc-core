@@ -307,6 +307,17 @@ impl Circuit {
         }
     }
 
+    /// Helper function to generate a deterministic output hash for the state vector
+    pub fn calculate_output_hash(&self, state_vector: &[[f64; 2]]) -> String {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        for [real, imag] in state_vector {
+            hasher.update(real.to_le_bytes());
+            hasher.update(imag.to_le_bytes());
+        }
+        hex::encode(hasher.finalize())
+    }
+
     /// Add a gate to the circuit with bound checking (Replaces assert!)
     pub fn add(&mut self, gate: Gate) -> Result<(), EngineError> {
         match &gate {

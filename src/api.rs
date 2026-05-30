@@ -1,8 +1,9 @@
-use crate::engine::{QuantumRegister, Circuit, Gate};
-use crate::proof::{StarkProver, Proof};
 use axum::{Json, http::StatusCode};
 use colored::*;
 use serde::{Deserialize, Serialize};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
+use crate::engine::{QuantumRegister, Circuit, Gate};
+use crate::proof::{StarkProver, Proof};
 
 #[derive(Debug, Deserialize)]
 pub struct ComputeTask {
@@ -32,6 +33,13 @@ pub struct VerifyProof {
 pub struct VerifyResponse {
     pub valid: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemInfo {
+    pub system_memory_used_kb: u64,
+    pub system_memory_total_kb: u64,
+    pub cpu_usage_percent: f32,
 }
 
 // --- Handlers ---
@@ -74,7 +82,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         .collect();
 
     // 5. Generate the real state hash commitment from the computed state vector
-    let generated_output_hash = calculate_output_hash(&formatted_state);
+    let generated_output_hash = circuit.calculate_output_hash(&formatted_state);
 
     // 6. Generate Plonky3 zk-STARK proof transcript over Mersenne31 prime field
     let prover = StarkProver;
@@ -125,13 +133,19 @@ pub async fn get_supported_gates() -> Json<Vec<String>> {
     Json(gates)
 }
 
-/// Helper function to generate a deterministic output hash for the state vector
-fn calculate_output_hash(state_vector: &[[f64; 2]]) -> String {
-    use sha3::{Digest, Sha3_256};
-    let mut hasher = Sha3_256::new();
-    for [real, imag] in state_vector {
-        hasher.update(real.to_le_bytes());
-        hasher.update(imag.to_le_bytes());
-    }
-    hex::encode(hasher.finalize())
+/// Returns a list of supported gates for Orchestrator discovery.
+pub async fn get_system_info() -> Json<SystemInfo> {
+    let mut sys = System::new_all();
+    // Refresh only what we need for performance
+    sys.refresh_specifics(
+        sysinfo::RefreshKind::new()
+            .with_cpu(CpuRefreshKind::everything())
+            .with_memory(MemoryRefreshKind::everything()),
+    );
+
+    Json(SystemInfo {
+        system_memory_used_kb: sys.used_memory() / 1024,
+        system_memory_total_kb: sys.total_memory() / 1024,
+        cpu_usage_percent: sys.global_cpu_info().cpu_usage(),
+    })
 }
