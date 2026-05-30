@@ -1,3 +1,5 @@
+#![deny(unused_imports)]
+
 use colored::*;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -26,6 +28,7 @@ async fn main() {
         .route("/compute", post(api::handle_compute))
         .route("/verify", post(api::handle_verify))
         .route("/gates", axum::routing::get(api::get_supported_gates))
+        .route("/sysinfo", axum::routing::get(api::get_system_info))
         .route("/health", axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }))
         .layer(CorsLayer::permissive());
 
