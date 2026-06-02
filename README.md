@@ -44,10 +44,23 @@ The WQC project evolves through three strategic phases to achieve a global-scale
 | `task_id` | `string` | Unique identifier for the computation task. |
 | `circuit_id` | `string` |  |
 | `node_id` | `string` |  |
-| `qubit_count`| `int` | Number of qubits ($N$). Memory cost scales by $2^N \times 16$ bytes. |
-| `original_qubit_count` | `int` |  |
-| `global_offset` | `string` |  |
-| `circuit` | `array` | Sequence of quantum gates (H, CNOT, CCNOT, etc.) to be applied. |
+| `qubit_count`| `int` | Compact register width ($N - C$). Memory cost scales by $2^{qubit\_count} \times 16$ bytes. |
+| `original_qubit_count` | `int` | Parent circuit width $N$ before slicing. |
+| `slice_id` | `string` | Binary path of the slice tree (bound into STARK public inputs). |
+| `slice_assignments` | `array` | Fixed legs `e_<k>` with values `0`/`1` (metadata; boundary applied upstream). |
+| `circuit` | `array` | Pruned, remapped gates (local indices `0 .. qubit_count-1`). |
+
+---
+
+### Tensor slice execution (Policy C)
+
+The orchestrator dispatches a **compact** sub-circuit. The executor (`engine.rs`):
+
+1. Allocates `2^qubit_count` amplitudes (`ContractionWorkspace`).
+2. Applies the pruned gate list (already in local indices).
+3. Returns `complex_result` = amplitude at computational basis **|0…0⟩** (`state[0]`).
+
+`slice_assignments` are validated and bound into zk-STARK public inputs; they are **not** combined into a legacy `basis_index` readout on the worker. See `doc/trace-spec.md` for the STARK row layout.
 
 ---
 
