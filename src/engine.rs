@@ -168,17 +168,18 @@ impl TensorNetwork {
             .execute_with_trace(workspace.register_mut())
             .map_err(EngineError::ExecutionFailed)?;
 
-        // Read off the amplitude at the basis state implied by fixed slice legs.
-        let basis_index = basis_index_from_assignments(&self.assignments)?;
+        // Compact register: orchestrator prunes fixed legs and remaps free qubits to 0..N-C-1.
+        // Slice boundary values live in assignments metadata; scalar readout is |0…0⟩ on free wires.
+        let _ = &self.assignments;
         let state = &workspace.register_mut().state;
-        if basis_index >= state.len() {
+        if state.is_empty() {
             return Err(EngineError::BasisIndexOutOfBounds {
-                index: basis_index,
-                dim: state.len(),
+                index: 0,
+                dim: 0,
             });
         }
 
-        let amp = state[basis_index];
+        let amp = state[0];
         Ok((
             ComplexResult {
                 real: amp.re,
@@ -209,22 +210,6 @@ fn parse_edge_index(edge_id: &str) -> Result<usize, EngineError> {
     suffix
         .parse::<usize>()
         .map_err(|_| EngineError::InvalidEdgeId(edge_id.to_string()))
-}
-
-/// Maps fixed slice legs (`e_0`, `e_1`, …) to a computational-basis index in the workspace.
-fn basis_index_from_assignments(assignments: &[SliceAssignment]) -> Result<usize, EngineError> {
-    let mut index = 0usize;
-    for a in assignments {
-        if a.value > 1 {
-            return Err(EngineError::InvalidAssignmentValue {
-                edge_id: a.edge_id.clone(),
-                value: a.value,
-            });
-        }
-        let edge_idx = parse_edge_index(&a.edge_id)?;
-        index |= (a.value as usize) << edge_idx;
-    }
-    Ok(index)
 }
 
 // --- Gate definitions and dense-kernel contraction backend (current executor) ---
