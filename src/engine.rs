@@ -25,10 +25,27 @@ pub struct ComplexResult {
     pub imag: f64,
 }
 
-/// SHA3-256 of the JSON-encoded complex result (matches orchestrator `crypto.CalculateSHA3_256`).
+/// Canonical JSON for SHA3-256 hashing — must match orchestrator `ComplexResult.MarshalJSON`.
+pub fn format_go_complex_result_json(result: &ComplexResult) -> String {
+    fn format_go_float(val: f64) -> String {
+        if val == (val as i64) as f64 {
+            format!("{:.1}", val)
+        } else {
+            format!("{val}")
+        }
+    }
+
+    format!(
+        r#"{{"real":{},"imag":{}}}"#,
+        format_go_float(result.real),
+        format_go_float(result.imag),
+    )
+}
+
+/// SHA3-256 of the canonical JSON-encoded complex result.
 pub fn calculate_complex_result_hash(result: &ComplexResult) -> String {
     use sha3::{Digest, Sha3_256};
-    let bytes = serde_json::to_vec(result).expect("ComplexResult must serialize");
+    let bytes = format_go_complex_result_json(result).into_bytes();
     hex::encode(Sha3_256::digest(&bytes))
 }
 
@@ -677,5 +694,32 @@ impl Circuit {
         }
 
         Ok(trace)
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::{calculate_complex_result_hash, format_go_complex_result_json, ComplexResult};
+
+    #[test]
+    fn complex_result_json_uses_go_integer_style() {
+        let json = format_go_complex_result_json(&ComplexResult {
+            real: 0.0,
+            imag: 1.0,
+        });
+        assert_eq!(json, r#"{"real":0.0,"imag":1.0}"#);
+    }
+
+    #[test]
+    fn complex_result_hash_matches_orchestrator_for_zero_imag() {
+        let hash = calculate_complex_result_hash(&ComplexResult {
+            real: 0.7071067811865475,
+            imag: 0.0,
+        });
+        // SHA3-256 of `{"real":0.7071067811865475,"imag":0.0}` — imag must be `0.0`, not `0`.
+        assert_eq!(
+            hash,
+            "ee10cd493b1b6773f6e947b471b3fc8c94009eac7ac09d189e64ead838dfc0d5"
+        );
     }
 }
