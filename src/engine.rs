@@ -639,61 +639,78 @@ impl Circuit {
         }
 
         // Step N+1: terminal boundary row (validates final register conditions for the STARK AIR).
-        if !self.gates.is_empty() {
-            let state = &register.state;
-            // Keep terminal row aligned with the last executed gate target.
-            // This is critical when the circuit has a single gate (row 0 transitions into boundary row).
-            let last_gate = self.gates.last().expect("non-empty by guard");
-            let logical_target = match last_gate {
+        let logical_target = self
+            .gates
+            .last()
+            .map(|gate| match gate {
                 Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
                 Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
                 Gate::CCNOT(_, _, t) => *t,
                 Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-            };
-            let phys_target = logical_target;
-
-            let mut max_pair_prob = -1.0;
-            let mut best_v0_idx = 0;
-            let mut best_v1_idx = 0;
-            let subspace_limit = state.len() >> 1;
-
-            for s in 0..subspace_limit {
-                let low_mask = (1 << phys_target) - 1;
-                let high_bits = (s & !low_mask) << 1;
-                let low_bits = s & low_mask;
-
-                let idx_v0 = high_bits | low_bits;
-                let idx_v1 = idx_v0 | (1 << phys_target);
-
-                let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
-                let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
-                let combined_prob = p0 + p1;
-
-                if combined_prob > max_pair_prob {
-                    max_pair_prob = combined_prob;
-                    best_v0_idx = idx_v0;
-                    best_v1_idx = idx_v1;
-                }
-            }
-
-            let v0_re = state[best_v0_idx].re;
-            let v0_im = state[best_v0_idx].im;
-            let v1_re = state[best_v1_idx].re;
-            let v1_im = state[best_v1_idx].im;
-
-            trace.push(0.0);           // Column 0
-            trace.push(0.0);           // Column 1
-            trace.push(0.0);           // Column 2
-            trace.push(1.0);           // Column 3
-            trace.push(0.0);           // Column 4
-            trace.push(v0_re);         // Column 5
-            trace.push(v0_im);         // Column 6
-            trace.push(v1_re);         // Column 7
-            trace.push(v1_im);         // Column 8
-            trace.push(0.0);           // Column 9
-        }
+            })
+            .unwrap_or(0);
+        push_terminal_trace_row(&register.state, logical_target, &mut trace);
 
         Ok(trace)
+    }
+}
+
+fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
+    let phys_target = logical_target;
+
+    let mut max_pair_prob = -1.0;
+    let mut best_v0_idx = 0;
+    let mut best_v1_idx = 0;
+    let subspace_limit = state.len() >> 1;
+
+    for s in 0..subspace_limit {
+        let low_mask = (1 << phys_target) - 1;
+        let high_bits = (s & !low_mask) << 1;
+        let low_bits = s & low_mask;
+
+        let idx_v0 = high_bits | low_bits;
+        let idx_v1 = idx_v0 | (1 << phys_target);
+
+        let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
+        let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
+        let combined_prob = p0 + p1;
+
+        if combined_prob > max_pair_prob {
+            max_pair_prob = combined_prob;
+            best_v0_idx = idx_v0;
+            best_v1_idx = idx_v1;
+        }
+    }
+
+    let v0_re = state[best_v0_idx].re;
+    let v0_im = state[best_v0_idx].im;
+    let v1_re = state[best_v1_idx].re;
+    let v1_im = state[best_v1_idx].im;
+
+    trace.push(0.0);     // Column 0
+    trace.push(0.0);   // Column 1
+    trace.push(0.0);   // Column 2
+    trace.push(1.0);   // Column 3
+    trace.push(0.0);   // Column 4
+    trace.push(v0_re); // Column 5
+    trace.push(v0_im); // Column 6
+    trace.push(v1_re); // Column 7
+    trace.push(v1_im); // Column 8
+    trace.push(0.0);   // Column 9
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::{Circuit, ContractionWorkspace};
+
+    #[test]
+    fn empty_circuit_emits_terminal_trace_row() {
+        let mut workspace = ContractionWorkspace::try_allocate(3, 30).expect("allocate");
+        let circuit = Circuit::new(3);
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+        assert_eq!(trace.len(), 10, "empty circuit should emit one 10-column boundary row");
     }
 }
 
