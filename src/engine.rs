@@ -701,7 +701,19 @@ fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, tra
 
 #[cfg(test)]
 mod trace_tests {
-    use super::{Circuit, ContractionWorkspace};
+    use super::{Circuit, ContractionWorkspace, Gate, TRACE_WIDTH};
+
+    fn trace_at(trace: &[f64], row: usize, col: usize) -> f64 {
+        trace[row * TRACE_WIDTH + col]
+    }
+
+    fn assert_approx_eq(a: f64, b: f64) {
+        let diff = (a - b).abs();
+        assert!(
+            diff < 1e-12,
+            "assert_approx_eq failed: left={a} right={b} diff={diff}"
+        );
+    }
 
     #[test]
     fn empty_circuit_emits_terminal_trace_row() {
@@ -711,6 +723,106 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
         assert_eq!(trace.len(), 10, "empty circuit should emit one 10-column boundary row");
+    }
+
+    #[test]
+    fn h_gate_trace_has_expected_fields() {
+        let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+        let mut circuit = Circuit::new(1);
+        circuit.add(Gate::H(0)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        // 1 gate => 2 rows (gate snapshot + terminal boundary)
+        assert_eq!(trace.len(), 2 * TRACE_WIDTH);
+
+        // Snapshot row
+        assert_approx_eq(trace_at(&trace, 0, 0), 4.0); // H gate id
+        assert_approx_eq(trace_at(&trace, 0, 1), 0.0); // ctrl_active
+        assert_approx_eq(trace_at(&trace, 0, 2), 0.0); // ctrl_active_2
+        assert_approx_eq(trace_at(&trace, 0, 3), 1.0); // p_cos default
+        assert_approx_eq(trace_at(&trace, 0, 4), 0.0); // p_sin default
+        assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // v0_re for |0>
+        assert_approx_eq(trace_at(&trace, 0, 7), 0.0); // v1_re for |1>
+
+        // Terminal boundary row (after H on |0> => both amps = 1/sqrt2)
+        let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+        assert_approx_eq(trace_at(&trace, 1, 0), 0.0); // padding/boundary
+        assert_approx_eq(trace_at(&trace, 1, 3), 1.0);
+        assert_approx_eq(trace_at(&trace, 1, 4), 0.0);
+        assert_approx_eq(trace_at(&trace, 1, 5), inv_sqrt2); // v0_re
+        assert_approx_eq(trace_at(&trace, 1, 7), inv_sqrt2); // v1_re
+    }
+
+    #[test]
+    fn cnot_with_control_zero_has_ctrl_active_zero() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::CNOT(0, 1)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        // 1 gate => 2 rows
+        assert_eq!(trace.len(), 2 * TRACE_WIDTH);
+
+        // Snapshot row (before applying CNOT on |00>)
+        assert_approx_eq(trace_at(&trace, 0, 0), 7.0); // CNOT gate id
+        assert_approx_eq(trace_at(&trace, 0, 1), 0.0); // ctrl_active must be 0
+        assert_approx_eq(trace_at(&trace, 0, 2), 0.0); // ctrl_active_2 must be 0
+        assert_approx_eq(trace_at(&trace, 0, 3), 1.0); // p_cos default
+        assert_approx_eq(trace_at(&trace, 0, 4), 0.0); // p_sin default
+        assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // target v0_re (target=0) for |00>
+        assert_approx_eq(trace_at(&trace, 0, 7), 0.0); // target v1_re (target=1)
+    }
+
+    #[test]
+    fn cnot_with_control_one_discretizes_ctrl_active_to_one() {
+        // Prepare control=1 by applying X on control qubit 0: |00> -> |01>, then CNOT(0,1): |01> -> |11>
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::X(0)).expect("add gate");
+        circuit.add(Gate::CNOT(0, 1)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        // 2 gates => 3 rows
+        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
+
+        // Snapshot row for CNOT is row=1
+        assert_approx_eq(trace_at(&trace, 1, 0), 7.0); // CNOT
+        assert_approx_eq(trace_at(&trace, 1, 1), 1.0); // ctrl_active must be 1 (marginal prob = 1.0)
+        assert_approx_eq(trace_at(&trace, 1, 2), 0.0); // ctrl_active_2 is unused => 0
+        assert_approx_eq(trace_at(&trace, 1, 5), 1.0); // target v0_re (target=0) for |01>
+        assert_approx_eq(trace_at(&trace, 1, 7), 0.0); // target v1_re (target=1)
+
+        // Terminal boundary row (after CNOT -> |11>, target qubit=1 => v0_re=0, v1_re=1)
+        assert_approx_eq(trace_at(&trace, 2, 0), 0.0); // boundary
+        assert_approx_eq(trace_at(&trace, 2, 5), 0.0);
+        assert_approx_eq(trace_at(&trace, 2, 7), 1.0);
+    }
+
+    #[test]
+    fn cnot_control_half_probability_sets_ctrl_active_zero() {
+        // H on control qubit => marginal control probability = 0.5, and we use strict `> 0.5` discretization.
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::H(0)).expect("add gate");
+        circuit.add(Gate::CNOT(0, 1)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        // 2 gates => 3 rows; CNOT snapshot is row=1
+        assert_approx_eq(trace_at(&trace, 1, 0), 7.0); // CNOT
+        assert_approx_eq(trace_at(&trace, 1, 1), 0.0); // ctrl_active should be 0 for prob == 0.5
+        assert_approx_eq(trace_at(&trace, 1, 2), 0.0);
     }
 }
 
