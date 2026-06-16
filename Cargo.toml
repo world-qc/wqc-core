@@ -13,9 +13,9 @@ num-complex = { version = "0.4", features = ["serde"] }
 sysinfo = "0.30"
 rayon = "1.8"
 # zk-STARKs Engine Integration
-wqc-stark-engine = { git = "ssh://git@github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core" }
-p3-field = "0.1.0"
-p3-mersenne-31 = "0.1.0"
+wqc-stark-engine = { git = "ssh://git@github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core", features = ["plonky3-stark"] }
+p3-field = "0.6.1"
+p3-mersenne-31 = "0.6.1"
 # Utilities
 hex = "0.4"
 rand = "0.8"

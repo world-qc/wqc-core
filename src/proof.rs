@@ -1,7 +1,7 @@
 //! zk-STARK proof generation and verification (`wqc-stark-engine` Mersenne31 AIR commitment).
 
 use serde::{Deserialize, Serialize};
-use wqc_stark_engine::{generate_stark_proof, verify_stark_proof_core, StarkContext as EngineContext};
+use wqc_stark_engine::{generate_plonky3_stark_proof, verify_stark_proof_core, StarkContext as EngineContext};
 use base64::{engine::general_purpose, Engine as _};
 
 /// Vision: the proof is the anchor of trust in a decentralized computer.
@@ -53,7 +53,7 @@ impl StarkProver {
         };
 
         // Run Mersenne31 AIR constraint accumulation (v1 transcript with embedded trace).
-        let proof_bytes = generate_stark_proof(&context, execution_trace);
+        let proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
         if proof_bytes.is_empty() {
             return Err("STARK prover runtime error: generated empty proof transcript.".to_string());
         }
