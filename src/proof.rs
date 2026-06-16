@@ -105,3 +105,56 @@ impl StarkProver {
         }
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::engine::{calculate_complex_result_hash, Circuit, ComplexResult, ContractionWorkspace, Gate};
+
+    #[test]
+    fn h_circuit_executor_trace_proves_and_verifies() {
+        let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+        let mut circuit = Circuit::new(1);
+        circuit.add(Gate::H(0)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+        let output_hash = calculate_complex_result_hash(&ComplexResult {
+            real: inv_sqrt2,
+            imag: 0.0,
+        });
+
+        let prover = StarkProver;
+        let proof = prover
+            .generate_proof("circuit-h", "task-h", "node-1", "0", &output_hash, &trace)
+            .expect("proof");
+
+        assert!(prover.verify_proof(&proof));
+    }
+
+    #[test]
+    fn inactive_cnot_circuit_executor_trace_proves_and_verifies() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::CNOT(0, 1)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        let output_hash = calculate_complex_result_hash(&ComplexResult {
+            real: 1.0,
+            imag: 0.0,
+        });
+
+        let prover = StarkProver;
+        let proof = prover
+            .generate_proof("circuit-cnot0", "task-cnot0", "node-1", "0", &output_hash, &trace)
+            .expect("proof");
+
+        assert!(prover.verify_proof(&proof));
+    }
+}

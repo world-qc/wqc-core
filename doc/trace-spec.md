@@ -78,6 +78,17 @@ Selector index for gate id `g`:
 
 Any backend (`CPU` / `wgpu`) must preserve this exact mapping rule for proof compatibility.
 
+### AIR transition caveat (multi-target circuits)
+
+Amplitude columns (`v0_re` … `v1_im`) are sampled on the **current row's target qubit**.
+Adjacent-row AIR constraints compare `curr` and `next` amplitude columns directly.
+When consecutive gates act on **different target wires**, those columns refer to different
+qubits and the transition sum may be non-zero even for a faithful simulator trace.
+
+Single-target circuits (e.g. repeated gates on wire `0`) and inactive controlled gates
+(`ctrl_active = 0`) satisfy AIR today. Multi-target sequences are tracked for a future
+trace-schema revision (Phase 3+).
+
 ## Proof transcript (v1)
 
 ```text
@@ -86,3 +97,8 @@ Any backend (`CPU` / `wgpu`) must preserve this exact mapping rule for proof com
 ```
 
 The verifier re-expands the embedded trace, recomputes `air_sum`, and checks `air_sum == 0` plus boundary amplitudes.
+
+## Phase 2 status
+
+Trace alignment between `wqc-core` and `wqc-stark-core` is complete. See
+`wqc-stark-engine/docs/PHASE2_TRACE_ALIGNMENT.md` for the checklist and test coverage.

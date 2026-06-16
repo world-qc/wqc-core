@@ -824,6 +824,89 @@ mod trace_tests {
         assert_approx_eq(trace_at(&trace, 1, 1), 0.0); // ctrl_active should be 0 for prob == 0.5
         assert_approx_eq(trace_at(&trace, 1, 2), 0.0);
     }
+
+    #[test]
+    fn cz_gate_trace_uses_gate_id_eight_and_discrete_control() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::X(0)).expect("add gate");
+        circuit.add(Gate::CZ(0, 1)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
+        assert_approx_eq(trace_at(&trace, 1, 0), 8.0); // CZ gate id
+        assert_approx_eq(trace_at(&trace, 1, 1), 1.0); // ctrl_active discretized to 1
+        assert_approx_eq(trace_at(&trace, 1, 2), 0.0);
+    }
+
+    #[test]
+    fn ccnot_gate_trace_uses_gate_id_nine_and_dual_controls() {
+        let mut workspace = ContractionWorkspace::try_allocate(3, 3).expect("allocate");
+        let mut circuit = Circuit::new(3);
+        circuit.add(Gate::X(0)).expect("add gate");
+        circuit.add(Gate::X(1)).expect("add gate");
+        circuit.add(Gate::CCNOT(0, 1, 2)).expect("add gate");
+
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        assert_eq!(trace.len(), 4 * TRACE_WIDTH);
+        assert_approx_eq(trace_at(&trace, 2, 0), 9.0); // CCNOT gate id
+        assert_approx_eq(trace_at(&trace, 2, 1), 1.0); // ctrl_active
+        assert_approx_eq(trace_at(&trace, 2, 2), 1.0); // ctrl_active_2
+    }
+
+    #[test]
+    fn executor_traces_satisfy_stark_air_for_h_and_cnot() {
+        use p3_field::PrimeField32;
+        use wqc_stark_engine::evaluate_execution_trace;
+
+        let cases: Vec<(&str, Vec<Gate>)> = vec![
+            ("h", vec![Gate::H(0)]),
+            ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
+        ];
+
+        for (name, gates) in cases {
+            let qubits = gates
+                .iter()
+                .map(|gate| match gate {
+                    Gate::CCNOT(_, _, t) | Gate::CNOT(_, t) | Gate::CZ(_, t) => *t + 1,
+                    Gate::X(t)
+                    | Gate::Y(t)
+                    | Gate::Z(t)
+                    | Gate::H(t)
+                    | Gate::S(t)
+                    | Gate::T(t)
+                    | Gate::RX(t, _)
+                    | Gate::RY(t, _)
+                    | Gate::RZ(t, _) => *t + 1,
+                })
+                .max()
+                .unwrap_or(1);
+
+            let mut workspace = ContractionWorkspace::try_allocate(qubits, qubits).expect("allocate");
+            let mut circuit = Circuit::new(qubits);
+            for gate in gates {
+                circuit.add(gate).expect("add gate");
+            }
+
+            let trace = circuit
+                .execute_with_trace(workspace.register_mut())
+                .expect("trace");
+
+            let air_sum = evaluate_execution_trace(&trace)
+                .unwrap_or_else(|| panic!("{name}: trace should expand to AIR"));
+            assert_eq!(
+                air_sum.as_canonical_u32(),
+                0,
+                "{name}: executor trace should satisfy AIR constraints"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
