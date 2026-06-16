@@ -1,4 +1,4 @@
-//! zk-STARK proof generation and verification (Plonky3 / Mersenne31 via `wqc-stark-engine`).
+//! zk-STARK proof generation and verification (`wqc-stark-engine` Mersenne31 AIR commitment).
 
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{generate_stark_proof, verify_stark_proof_core, StarkContext as EngineContext};
@@ -27,7 +27,7 @@ pub struct PublicInputs {
 pub struct StarkProver;
 
 impl StarkProver {
-    /// PROVER ROLE: pipes the flattened `f64` execution trace into the Plonky3 AIR prover.
+    /// PROVER ROLE: pipes the flattened `f64` execution trace into the AIR commitment prover.
     ///
     /// Binds `circuit_id`, `slice_id`, `task_id`, `node_id`, and the contracted scalar hash
     /// into the outward-facing `PublicInputs` envelope.
@@ -52,7 +52,7 @@ impl StarkProver {
             output_hash,
         };
 
-        // Run the real Plonky3 multi-polynomial row transformation.
+        // Run Mersenne31 AIR constraint accumulation (v1 transcript with embedded trace).
         let proof_bytes = generate_stark_proof(&context, execution_trace);
         if proof_bytes.is_empty() {
             return Err("STARK prover runtime error: generated empty proof transcript.".to_string());
@@ -72,7 +72,7 @@ impl StarkProver {
         })
     }
 
-    /// VALIDATOR ROLE: stateless verification without re-executing contraction (O(1) transcript check).
+    /// VALIDATOR ROLE: stateless verification via embedded trace + AIR re-evaluation.
     pub fn verify_proof(&self, proof: &Proof) -> bool {
         let fields = [
             &proof.public_inputs.circuit_id,

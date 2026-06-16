@@ -577,8 +577,8 @@ impl Circuit {
                 _ => (0.0, 0.0),
             };
 
-            let ctrl_active = ctrl_prob_1;
-            let ctrl_active_2 = ctrl_prob_2;
+            let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };
+            let ctrl_active_2 = if ctrl_prob_2 > 0.5 { 1.0 } else { 0.0 };
 
             // Columns 3 & 4: trigonometric rotation components (RX/RY/RZ) or defaults.
             let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
