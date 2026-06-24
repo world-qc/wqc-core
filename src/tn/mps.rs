@@ -8,7 +8,7 @@ use nalgebra::DMatrix;
 use num_complex::Complex64;
 
 use super::gates::{
-    exact_bond_dim, max_bond_dim_from_env, swap_matrix, two_qubit_matrix, unary_matrix, Mat4,
+    max_bond_dim_from_env, swap_matrix, two_qubit_matrix, unary_matrix, Mat4,
 };
 
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumIter};
 use std::fmt;
-use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
 // --- Shared task / result types (serialized by api and wqc-node) ---
 
