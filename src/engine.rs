@@ -1,9 +1,5 @@
-use ndarray::Array1;
-use num_complex::Complex64;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumIter};
-use sysinfo::System;
 use std::fmt;
 use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
@@ -100,17 +96,12 @@ impl fmt::Display for EngineError {
 
 // --- Step 1: Pre-allocation workspace ---
 
-/// Working memory for tensor contraction: one contiguous complex buffer sized `2^qubit_count`.
-///
-/// `qubit_count` is the effective complexity for this slice; `original_qubit_count` records
-/// how much the global circuit was shrunk before dispatch (engine tuning / logging).
+/// Working memory for tensor contraction: rank-N TN state (`2^qubit_count` amplitudes).
 pub struct ContractionWorkspace {
-    register: QuantumRegister,
-    /// Global circuit width before slicing; consumed by the future TN backend initializer.
-    #[allow(dead_code)]
+    state: crate::tn::DenseTnState,
+    /// Global circuit width before slicing; used for Policy C boundary validation.
     pub original_qubit_count: usize,
     /// Bytes reserved up front (`2^qubit_count * 16`) to avoid fragmentation before contraction.
-    #[allow(dead_code)]
     reserved_bytes: u64,
 }
 
@@ -118,20 +109,20 @@ impl ContractionWorkspace {
     /// Reserves `2^qubit_count * 16` bytes and rejects tasks that exceed available RAM.
     pub fn try_allocate(qubit_count: usize, original_qubit_count: usize) -> Result<Self, EngineError> {
         let reserved_bytes = (1u64 << qubit_count).saturating_mul(16);
-        let register = QuantumRegister::new(qubit_count)?;
+        let state = crate::tn::DenseTnState::try_new(qubit_count)?;
         Ok(Self {
-            register,
+            state,
             original_qubit_count,
             reserved_bytes,
         })
     }
 
     pub fn qubit_count(&self) -> usize {
-        self.register.qubit_count
+        self.state.qubit_count
     }
 
     pub fn register_mut(&mut self) -> &mut QuantumRegister {
-        &mut self.register
+        &mut self.state
     }
 }
 
@@ -151,7 +142,7 @@ impl TensorNetwork {
         gates: Vec<Gate>,
         assignments: Vec<SliceAssignment>,
     ) -> Result<Self, EngineError> {
-        validate_assignments(&assignments)?;
+        crate::tn::boundary::BoundaryConditions::from_assignments(&assignments)?;
 
         // Reject out-of-bounds qubit indices early (replaces panicking asserts).
         let mut circuit = Circuit::new(qubit_count);
@@ -166,7 +157,7 @@ impl TensorNetwork {
         })
     }
 
-    /// Executes gate contractions on the pre-allocated workspace and returns the scalar amplitude.
+    /// Gate-by-gate TN contraction on the compact register; returns scalar amplitude + STARK trace.
     pub fn contract(
         &self,
         workspace: &mut ContractionWorkspace,
@@ -175,66 +166,17 @@ impl TensorNetwork {
             return Err(EngineError::MismatchedRegister);
         }
 
-        let mut circuit = Circuit::new(self.qubit_count);
-        for gate in &self.gates {
-            circuit.add(gate.clone())?;
-        }
-
-        // Run the interim state-vector kernel and capture the 10-column STARK execution trace.
-        let trace = circuit
-            .execute_with_trace(workspace.register_mut())
-            .map_err(EngineError::ExecutionFailed)?;
-
-        // Compact register: orchestrator prunes fixed legs and remaps free qubits to 0..N-C-1.
-        // Slice boundary values live in assignments metadata; scalar readout is |0…0⟩ on free wires.
-        let _ = &self.assignments;
-        let state = &workspace.register_mut().state;
-        if state.is_empty() {
-            return Err(EngineError::BasisIndexOutOfBounds {
-                index: 0,
-                dim: 0,
-            });
-        }
-
-        let amp = state[0];
-        Ok((
-            ComplexResult {
-                real: amp.re,
-                imag: amp.im,
-            },
-            trace,
-        ))
+        crate::tn::contract_slice(
+            self.qubit_count,
+            &self.gates,
+            &self.assignments,
+            workspace.original_qubit_count,
+            &mut workspace.state,
+        )
     }
 }
 
-fn validate_assignments(assignments: &[SliceAssignment]) -> Result<(), EngineError> {
-    for a in assignments {
-        if a.value > 1 {
-            return Err(EngineError::InvalidAssignmentValue {
-                edge_id: a.edge_id.clone(),
-                value: a.value,
-            });
-        }
-        parse_edge_index(&a.edge_id)?;
-    }
-    Ok(())
-}
-
-fn parse_edge_index(edge_id: &str) -> Result<usize, EngineError> {
-    let suffix = edge_id
-        .strip_prefix("e_")
-        .ok_or_else(|| EngineError::InvalidEdgeId(edge_id.to_string()))?;
-    suffix
-        .parse::<usize>()
-        .map_err(|_| EngineError::InvalidEdgeId(edge_id.to_string()))
-}
-
-// --- Gate definitions and dense-kernel contraction backend (current executor) ---
-//
-// NOTE:
-// - WQC targets heterogeneous decentralized nodes (servers, laptops, mobile, browser-class devices).
-// - The long-term accelerator path is WebGPU via `wgpu` (portable), not vendor-locked CUDA/cuTensorNet.
-// - This dense kernel remains the reference executor until a `wgpu` backend emits the same trace schema.
+// --- Gate definitions (API + STARK trace metadata) ---
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
@@ -288,196 +230,8 @@ impl Gate {
     }
 }
 
-/// Dense complex buffer backing the interim contraction kernel (`|ψ⟩` amplitudes).
-pub struct QuantumRegister {
-    pub state: Array1<Complex64>,
-    pub qubit_count: usize,
-}
-
-impl QuantumRegister {
-    /// Creates a register after a dynamic memory check (prevents OOM before contraction).
-    pub fn new(qubit_count: usize) -> Result<Self, EngineError> {
-        // Required bytes: (2^N) * 16 for Complex64 amplitudes.
-        let required_memory = (1u64 << qubit_count).saturating_mul(16);
-
-        let mut sys = System::new_all();
-        sys.refresh_memory();
-
-        let available_memory = sys.available_memory();
-        let total_memory = sys.total_memory();
-
-        // Hardening: fit within 80% of currently available RAM and 90% of total physical RAM.
-        let available_threshold = (available_memory as f64 * 0.8) as u64;
-        let total_threshold = (total_memory as f64 * 0.9) as u64;
-
-        if required_memory > available_threshold || required_memory > total_threshold {
-            return Err(EngineError::InsufficientMemory {
-                required: required_memory,
-                available: available_memory,
-            });
-        }
-
-        // Safety cap against accidental huge allocations (e.g. mis-reported qubit counts).
-        if qubit_count == 0 || qubit_count > 40 {
-            return Err(EngineError::InvalidQubitCount(qubit_count));
-        }
-
-        let dim = 1 << qubit_count;
-        let mut state = Array1::from_elem(dim, Complex64::new(0.0, 0.0));
-        state[0] = Complex64::new(1.0, 0.0); // |0…0⟩
-        Ok(Self { state, qubit_count })
-    }
-
-    pub fn apply_gate(&mut self, gate: &Gate) {
-        match gate {
-            Gate::H(t) => {
-                // Hadamard: creates superposition on the target qubit.
-                let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
-                self.apply_unary(*t, |v0, v1| {
-                    ((v0 + v1) * inv_sqrt2, (v0 - v1) * inv_sqrt2)
-                });
-            }
-            Gate::X(t) => {
-                // Pauli-X: quantum NOT (swaps |0⟩ and |1⟩ on the target).
-                self.apply_unary(*t, |v0, v1| (v1, v0))
-            }
-            Gate::Y(t) => {
-                // Pauli-Y: π rotation around the Y axis.
-                let i = Complex64::i();
-                self.apply_unary(*t, |v0, v1| (v1 * (-i), v0 * i));
-            }
-            Gate::Z(t) => {
-                // Pauli-Z: phase flip on |1⟩.
-                self.apply_unary(*t, |v0, v1| (v0, -v1))
-            }
-            Gate::S(t) => {
-                // S gate: Z^{1/2} (90° phase).
-                let i = Complex64::i();
-                self.apply_unary(*t, |v0, v1| (v0, v1 * i));
-            }
-            Gate::T(t) => {
-                // T gate: Z^{1/4} (π/4 phase).
-                let factor = Complex64::new(
-                    std::f64::consts::FRAC_1_SQRT_2,
-                    std::f64::consts::FRAC_1_SQRT_2,
-                );
-                self.apply_unary(*t, |v0, v1| (v0, v1 * factor));
-            }
-            Gate::CNOT(c, t) => {
-                // Controlled-NOT: flip target when control is |1⟩.
-                self.apply_controlled(*c, *t, |v0, v1| (v1, v0))
-            }
-            Gate::CZ(c, t) => {
-                // Controlled-Z: phase on target when control is |1⟩.
-                self.apply_controlled(*c, *t, |v0, v1| (v0, -v1))
-            }
-            Gate::RX(t, theta) => {
-                // Rotation around X by theta.
-                let (sin, cos) = (theta / 2.0).sin_cos();
-                let cos_c = Complex64::new(cos, 0.0);
-                let n_i_sin_c = Complex64::new(0.0, -sin);
-                self.apply_unary(*t, |v0, v1| {
-                    (v0 * cos_c + v1 * n_i_sin_c, v0 * n_i_sin_c + v1 * cos_c)
-                });
-            }
-            Gate::RY(t, theta) => {
-                // Rotation around Y by theta.
-                let (sin, cos) = (theta / 2.0).sin_cos();
-                self.apply_unary(*t, |v0, v1| {
-                    (v0 * cos - v1 * sin, v0 * sin + v1 * cos)
-                });
-            }
-            Gate::RZ(t, theta) => {
-                // Rotation around Z by theta.
-                let (sin, cos) = (theta / 2.0).sin_cos();
-                let exp_p = Complex64::new(cos, -sin); // e^{-iθ/2}
-                let exp_m = Complex64::new(cos, sin);  // e^{+iθ/2}
-                self.apply_unary(*t, |v0, v1| (v0 * exp_p, v1 * exp_m));
-            }
-            Gate::CCNOT(c1, c2, t) => {
-                // Toffoli (CCNOT): universal for classical reversible logic.
-                self.apply_ccnot(*c1, *c2, *t)
-            }
-        }
-    }
-
-    /// Applies a single-qubit unitary in parallel over all amplitude pairs for qubit `t`.
-    fn apply_unary<F>(&mut self, t: usize, f: F)
-    where
-        F: Fn(Complex64, Complex64) -> (Complex64, Complex64) + Sync + Send,
-    {
-        let size = 1 << self.qubit_count;
-        let step = 1 << t;
-
-        (0..size).into_par_iter().step_by(step * 2).for_each(|i| {
-            for j in i..i + step {
-                unsafe {
-                    // Raw pointers allow rayon to mutate disjoint index pairs concurrently.
-                    let ptr = self.state.as_ptr() as *mut Complex64;
-                    let v0 = *ptr.add(j);
-                    let v1 = *ptr.add(j + step);
-                    let (new_v0, new_v1) = f(v0, v1);
-                    *ptr.add(j) = new_v0;
-                    *ptr.add(j + step) = new_v1;
-                }
-            }
-        });
-    }
-
-    /// Applies a controlled unitary only on basis states where the control qubit is |1⟩.
-    fn apply_controlled<F>(&mut self, c: usize, t: usize, f: F)
-    where
-        F: Fn(Complex64, Complex64) -> (Complex64, Complex64) + Sync + Send,
-    {
-        let size = 1 << self.qubit_count;
-        let step_t = 1 << t;
-        let mask_c = 1 << c;
-
-        (0..size).into_par_iter().step_by(step_t * 2).for_each(|i| {
-            for j in i..i + step_t {
-                if (j & mask_c) != 0 {
-                    unsafe {
-                        let ptr = self.state.as_ptr() as *mut Complex64;
-                        let v0 = *ptr.add(j);
-                        let v1 = *ptr.add(j + step_t);
-                        let (new_v0, new_v1) = f(v0, v1);
-                        *ptr.add(j) = new_v0;
-                        *ptr.add(j + step_t) = new_v1;
-                    }
-                }
-            }
-        });
-    }
-
-    /// Toffoli gate implementation: swap target amplitudes when both controls are |1⟩.
-    fn apply_ccnot(&mut self, c1: usize, c2: usize, target: usize) {
-        let dim = self.state.len();
-        let m1 = 1 << c1;
-        let m2 = 1 << c2;
-        let mt = 1 << target;
-
-        let state_ptr = self.state.as_slice_mut().expect("Memory error");
-        let raw_ptr = state_ptr.as_mut_ptr() as usize;
-
-        (0..dim).into_par_iter().for_each(|i| {
-            if (i & m1) != 0 && (i & m2) != 0 {
-                let target_bit = (i & mt) != 0;
-                let flipped_idx = if target_bit { i & !mt } else { i | mt };
-
-                // Touch each swap pair only once to avoid double-flipping.
-                if i < flipped_idx {
-                    unsafe {
-                        let ptr = raw_ptr as *mut Complex64;
-                        let v1 = *ptr.add(i);
-                        let v2 = *ptr.add(flipped_idx);
-                        *ptr.add(i) = v2;
-                        *ptr.add(flipped_idx) = v1;
-                    }
-                }
-            }
-        });
-    }
-}
+/// Dense rank-N TN state used by the reference contraction backend.
+pub use crate::tn::DenseTnState as QuantumRegister;
 
 pub struct Circuit {
     pub qubit_count: usize,
@@ -532,218 +286,15 @@ impl Circuit {
         Ok(())
     }
 
-    /// Executes the circuit while capturing a 10-column structured trace aligned with `wqc-stark-core`.
-    ///
-    /// Each gate emits two rows: a pre-gate snapshot (active `gate_id`) and a post-gate snapshot
-    /// (`gate_id = 0`) on the same target qubit. Column 9 records that target index so the AIR can
-    /// skip amplitude constraints on cross-wire transitions (multi-target circuits).
+    /// Executes the circuit while capturing the 11-column STARK trace via the TN executor.
     pub fn execute_with_trace(&self, register: &mut QuantumRegister) -> Result<Vec<f64>, String> {
         if self.qubit_count != register.qubit_count {
             return Err("Register/circuit qubit count mismatch".to_string());
         }
 
-        let total_rows = self.gates.len() * 2 + 1;
-        let mut trace = Vec::with_capacity(total_rows * TRACE_WIDTH);
-
-        for gate in &self.gates {
-            let logical_target = gate_logical_target(gate);
-            push_gate_snapshot_row(&register.state, gate, logical_target, &mut trace);
-            register.apply_gate(gate);
-            push_post_gate_row(&register.state, logical_target, &mut trace);
-        }
-
-        let terminal_target = self
-            .gates
-            .last()
-            .map(gate_logical_target)
-            .unwrap_or(0);
-        push_terminal_trace_row(&register.state, terminal_target, &mut trace);
-        apply_transition_links(&mut trace);
-
-        Ok(trace)
+        crate::tn::trace::execute_with_trace(self.qubit_count, &self.gates, register)
+            .map_err(|e| e.to_string())
     }
-}
-
-/// Sets column 10 on each row: `1` when the next row samples the same target qubit.
-fn apply_transition_links(trace: &mut [f64]) {
-    let row_count = trace.len() / TRACE_WIDTH;
-    for row in 0..row_count {
-        let base = row * TRACE_WIDTH;
-        let link = if row + 1 < row_count {
-            let curr_target = trace[base + 9];
-            let next_target = trace[(row + 1) * TRACE_WIDTH + 9];
-            if (curr_target - next_target).abs() < f64::EPSILON {
-                1.0
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-        trace[base + 10] = link;
-    }
-}
-
-fn gate_logical_target(gate: &Gate) -> usize {
-    match gate {
-        Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
-        Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
-        Gate::CCNOT(_, _, t) => *t,
-        Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-    }
-}
-
-fn sample_target_amplitudes(
-    state: &Array1<Complex64>,
-    phys_target: usize,
-) -> (f64, f64, f64, f64) {
-    let mut max_pair_prob = -1.0;
-    let mut best_v0_idx = 0;
-    let mut best_v1_idx = 0;
-    let subspace_limit = state.len() >> 1;
-
-    for s in 0..subspace_limit {
-        let low_mask = (1 << phys_target) - 1;
-        let high_bits = (s & !low_mask) << 1;
-        let low_bits = s & low_mask;
-
-        let idx_v0 = high_bits | low_bits;
-        let idx_v1 = idx_v0 | (1 << phys_target);
-
-        let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
-        let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
-        let combined_prob = p0 + p1;
-
-        if combined_prob > max_pair_prob {
-            max_pair_prob = combined_prob;
-            best_v0_idx = idx_v0;
-            best_v1_idx = idx_v1;
-        }
-    }
-
-    (
-        state[best_v0_idx].re,
-        state[best_v0_idx].im,
-        state[best_v1_idx].re,
-        state[best_v1_idx].im,
-    )
-}
-
-fn push_trace_row(
-    trace: &mut Vec<f64>,
-    gate_id: f64,
-    ctrl_active: f64,
-    ctrl_active_2: f64,
-    p_cos: f64,
-    p_sin: f64,
-    v0_re: f64,
-    v0_im: f64,
-    v1_re: f64,
-    v1_im: f64,
-    target_qubit: f64,
-) {
-    trace.push(gate_id);
-    trace.push(ctrl_active);
-    trace.push(ctrl_active_2);
-    trace.push(p_cos);
-    trace.push(p_sin);
-    trace.push(v0_re);
-    trace.push(v0_im);
-    trace.push(v1_re);
-    trace.push(v1_im);
-    trace.push(target_qubit);
-    trace.push(0.0); // transition_link filled by apply_transition_links
-}
-
-fn push_gate_snapshot_row(
-    state: &Array1<Complex64>,
-    gate: &Gate,
-    logical_target: usize,
-    trace: &mut Vec<f64>,
-) {
-    let gate_id = gate.to_stark_id().unwrap_or(0.0);
-    let phys_target = logical_target;
-
-    let (ctrl_prob_1, ctrl_prob_2) = match gate {
-        Gate::CNOT(c, _) | Gate::CZ(c, _) => {
-            let phys_ctrl = *c;
-            let mut prob = 0.0;
-            for (idx, amplitude) in state.iter().enumerate() {
-                if (idx >> phys_ctrl) & 1 == 1 {
-                    prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                }
-            }
-            (prob, 0.0)
-        }
-        Gate::CCNOT(c1, c2, _) => {
-            let mut prob_1 = 0.0;
-            let mut prob_2 = 0.0;
-            for (idx, amplitude) in state.iter().enumerate() {
-                let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                if (idx >> c1) & 1 == 1 {
-                    prob_1 += p;
-                }
-                if (idx >> c2) & 1 == 1 {
-                    prob_2 += p;
-                }
-            }
-            (prob_1, prob_2)
-        }
-        _ => (0.0, 0.0),
-    };
-
-    let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };
-    let ctrl_active_2 = if ctrl_prob_2 > 0.5 { 1.0 } else { 0.0 };
-    let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
-    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, phys_target);
-
-    push_trace_row(
-        trace,
-        gate_id,
-        ctrl_active,
-        ctrl_active_2,
-        p_cos,
-        p_sin,
-        v0_re,
-        v0_im,
-        v1_re,
-        v1_im,
-        logical_target as f64,
-    );
-}
-
-fn push_post_gate_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
-    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
-    push_trace_row(
-        trace,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        v0_re,
-        v0_im,
-        v1_re,
-        v1_im,
-        logical_target as f64,
-    );
-}
-
-fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
-    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
-    push_trace_row(
-        trace,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        v0_re,
-        v0_im,
-        v1_re,
-        v1_im,
-        logical_target as f64,
-    );
 }
 
 #[cfg(test)]

@@ -26,7 +26,8 @@ The WQC project evolves through three strategic phases to achieve a global-scale
 ### 🚧 Phase 2: Scaling & Distribution (Current)
 *Focus: Breaking the memory wall via parallelization.*
 - [x] **zk-STARKs Integration**: Near-instant verification of distributed tasks via Zero-Knowledge proofs.
-- [ ] **Tensor Network (TN) Engine**: Transition from state vectors to TN contraction to allow circuit slicing.
+- [x] **Tensor Network (TN) Engine (Phase 2a)**: Gate-by-gate TN contraction (`src/tn/`), Policy C boundary validation, dense exact backend. See `doc/tn-engine.md`.
+- [ ] **TN bond truncation / MPS**: Sub-exponential memory for low-entanglement slices.
 - [ ] **Distributed Processing**: Splitting large-scale circuits across multiple swarm nodes.
 - [ ] **Data Sharding**: Mechanisms to store and retrieve large quantum states across the P2P network.
 
@@ -54,13 +55,14 @@ The WQC project evolves through three strategic phases to achieve a global-scale
 
 ### Tensor slice execution (Policy C)
 
-The orchestrator dispatches a **compact** sub-circuit. The executor (`engine.rs`):
+The orchestrator dispatches a **compact** sub-circuit. The executor (`engine.rs` + `src/tn/`):
 
-1. Allocates `2^qubit_count` amplitudes (`ContractionWorkspace`).
-2. Applies the pruned gate list (already in local indices).
-3. Returns `complex_result` = amplitude at computational basis **|0…0⟩** (`state[0]`).
+1. Allocates `2^qubit_count` amplitudes (`ContractionWorkspace` / `DenseTnState`).
+2. Validates Policy C boundaries from `slice_assignments` (`tn/boundary.rs`).
+3. Contracts gate tensors in order (`tn/contract.rs`) and emits the STARK trace.
+4. Returns `complex_result` = amplitude at computational basis **|0…0⟩** on free wires.
 
-`slice_assignments` are validated and bound into zk-STARK public inputs; they are **not** combined into a legacy `basis_index` readout on the worker. See `doc/trace-spec.md` for the STARK row layout.
+See `doc/tn-engine.md` and `doc/trace-spec.md`.
 
 ---
 
