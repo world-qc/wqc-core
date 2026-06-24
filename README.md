@@ -4,147 +4,162 @@
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-yellow.svg)]()
 
 `wqc-core` is the computational heart of the World Quantum Computer (WQC) protocol.
-It is a high-performance quantum circuit simulator written in Rust, optimized for **Proof of Useful Work (PoUW)** in a decentralized environment.
+It is a Rust quantum circuit executor optimized for **Decentralized Proof of Useful Work (D-PoUW)**:
+each slice is contracted as a **tensor network** (default: bond-truncated MPS), then proven with a zk-STARK.
 
 ## Key Features
-- **High-Precision Simulation**: Optimized in-place state vector manipulation for universal quantum circuits.
-- **Zero-Knowledge PoUW**: True Proof of Useful Work driven by zk-STARKs, mathematically proving that the quantum simulation was executed honestly according to the specified constraints.
-- **Dynamic Circuit Commitments**: Cryptographically binds the exact quantum gate layout to a unique `circuit_id` (SHA3-256 hash), preventing malicious task substitution or trace tampering.
-- **Succinct Non-Interactive Verification**: Leverages the FRI protocol to allow the orchestrator to validate complex simulation proofs in polylogarithmic time without re-running any quantum gates.
-- **Cross-Platform Data Alignment**: Standardized float array serialization for seamless cryptographic and state interoperability between Rust, Go, and Python backends.
+
+- **Tensor-network execution**: Gate-by-gate MPS contraction with SVD bond truncation (`O(N · χ²)` memory).
+- **zk-STARK D-PoUW**: Plonky3 uni-STARK over the execution trace (`wqc-stark-engine`); no re-execution on verify.
+- **Policy C slices**: Compact register width `qubit_count = N − |assignments|`; scalar output = ⟨0…0|ψ⟩ amplitude.
+- **Public-input binding**: `circuit_id`, `sub_task_id`, `node_id`, `slice_id`, `output_result_hash` in every proof.
+- **Orchestrator χ hints**: Per-task `mps_max_bond_dim` capped by node env `WQC_MPS_MAX_BOND_DIM`.
+- **WorkReport metrics**: `trace_rows`, `gate_count`, `compute_wall_ms`, `prove_wall_ms`, `proof_bytes` for Gas settlement upstream.
 
 ## Technical Architecture & Roadmap
-The WQC project evolves through three strategic phases to achieve a global-scale decentralized quantum computer.
 
-### ✅ Phase 1: Foundation (Completed)
-*Focus: Single-node optimization and trust protocol.*
-- [x] **Universal Gate Set**: Support for H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ and CCNOT (Toffoli).
-- [x] **State Vector Engine**: Successfully simulated 30 Qubits on consumer hardware.
-- [x] **Trust Anchor**: Implementation of the "Compute -> Mine -> Verify" cycle.
-- [x] **API Alignment**: Unified data structures across Orchestrator and Swarm Nodes.
+### Phase 1: Foundation (completed)
 
-### 🚧 Phase 2: Scaling & Distribution (Current)
-*Focus: Breaking the memory wall via parallelization.*
-- [x] **zk-STARKs Integration**: Near-instant verification of distributed tasks via Zero-Knowledge proofs.
-- [x] **Tensor Network (TN) Engine (Phase 2a)**: Gate-by-gate TN contraction, Policy C boundaries (`src/tn/`).
-- [x] **MPS bond truncation (Phase 2b)**: Default backend `MpsState`, `WQC_MPS_MAX_BOND_DIM` (default 128). See `doc/tn-engine.md`.
-- [ ] **Distributed Processing**: Splitting large-scale circuits across multiple swarm nodes.
-- [ ] **Data Sharding**: Mechanisms to store and retrieve large quantum states across the P2P network.
+- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT (Toffoli decomposition in MPS).
+- Compute → prove → verify cycle with cross-language hash alignment (Rust / Go).
+- HTTP API over Unix domain socket (default) or TCP.
 
-### 🚀 Phase 3: Sovereign Network (Upcoming)
-*Focus: Privacy and hardware integration.*
-- [ ] **QPU Proxy**: Support for connecting physical quantum processing units to the WQC protocol.
-- [ ] **Economic Layer**: Integration of the $WQC token for automated reward distribution.
+### Phase 2: Scaling & distribution (current)
+
+- [x] zk-STARK integration (trace-schema v2, multi-target AIR).
+- [x] TN engine Phase 2a (`src/tn/`, Policy C boundaries).
+- [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
+- [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
+- [ ] WebGPU MPS kernels (`wgpu`).
+- [ ] Distributed processing / P2P state sharding (orchestrator + node responsibility).
+
+### Phase 3: Sovereign network (upcoming)
+
+- Physical QPU proxy.
+- On-chain economic layer (orchestrator / L2).
+
+## Configuration
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `WQC_MPS_MAX_BOND_DIM` | `128` | Node ceiling on MPS bond dimension χ |
+| `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
+
+Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
 
 ## API Reference
 
-### Data Parameters Definition
+### Endpoints
 
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `task_id` | `string` | Unique identifier for the computation task. |
-| `circuit_id` | `string` |  |
-| `node_id` | `string` |  |
-| `qubit_count`| `int` | Compact register width ($N - C$). Memory cost scales by $2^{qubit\_count} \times 16$ bytes. |
-| `original_qubit_count` | `int` | Parent circuit width $N$ before slicing. |
-| `slice_id` | `string` | Binary path of the slice tree (bound into STARK public inputs). |
-| `slice_assignments` | `array` | Fixed legs `e_<k>` with values `0`/`1` (metadata; boundary applied upstream). |
-| `circuit` | `array` | Pruned, remapped gates (local indices `0 .. qubit_count-1`). |
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/compute` | Contract slice + generate STARK proof |
+| `POST` | `/verify` | Stateless STARK verification |
+| `GET` | `/gates` | Supported gate names (feature discovery) |
+| `GET` | `/sysinfo` | Host RAM / CPU snapshot |
 
----
+### `POST /compute` — request fields
 
-### Tensor slice execution (Policy C)
+| Field | Type | Description |
+|-------|------|-------------|
+| `task_id` | `string` | Sub-task ID (STARK `sub_task_id`) |
+| `circuit_id` | `string` | SHA3-256 of pruned circuit (public input) |
+| `node_id` | `string` | Executing node identity |
+| `qubit_count` | `int` | Effective compact width after slice cuts |
+| `original_qubit_count` | `int` | Parent circuit width before slicing |
+| `slice_id` | `string` | Binary path in slice tree (e.g. `"0"`, `"01"`) |
+| `slice_assignments` | `array` | Fixed legs `{ "edge_id": "e_0", "value": 0\|1 }` |
+| `circuit` | `array` | Pruned gates with local qubit indices |
+| `mps_max_bond_dim` | `int` (optional) | Orchestrator χ recommendation; effective χ = `min(this, WQC_MPS_MAX_BOND_DIM)` |
 
-The orchestrator dispatches a **compact** sub-circuit. The executor (`engine.rs` + `src/tn/`):
+**Example request:**
 
-1. Allocates MPS workspace (`O(N · χ²)`; `χ` from `WQC_MPS_MAX_BOND_DIM`, default 128).
-2. Validates Policy C boundaries from `slice_assignments` (`tn/boundary.rs`).
-3. Contracts gate tensors in order (`tn/contract.rs`) and emits the STARK trace.
-4. Returns `complex_result` = amplitude at computational basis **|0…0⟩** on free wires.
-
-See `doc/tn-engine.md` and `doc/trace-spec.md`.
-
----
-
-### 1. Compute Task (`POST /compute`)
-Execute a quantum circuit and generate a cryptographic proof of work.
-
-**Example Request:**
 ```json
 {
-  "task_id": "job-550e8400",
-  "circuit_id": "sha3-256-hash-of-the-pruned-circuit",
-  "node_id": "node-identifier-of-itself",
-  "qubit_count": 5,
+  "task_id": "sub-task-1",
+  "circuit_id": "abc123…",
+  "node_id": "12D3Koo…",
+  "qubit_count": 3,
+  "original_qubit_count": 26,
+  "slice_id": "0",
+  "slice_assignments": [],
+  "mps_max_bond_dim": 128,
   "circuit": [
-    { "type": "H", "params": 0 },
+    { "type": "H", "params": [0] },
     { "type": "CCNOT", "params": [0, 1, 2] }
-  ],
+  ]
 }
 ```
 
-**Example Response:**
+**Example response:**
+
 ```json
 {
-  "task_id": "job-550e8400",
+  "task_id": "sub-task-1",
   "status": "success",
-  "state_vector": [[0.707, 0.0], [0.0, 0.0], "..."],
+  "complex_result": { "real": 0.3535533905932738, "imag": 0.0 },
   "proof": {
     "public_inputs": {
-      "circuit_id": "sha3-256-hash-of-the-pruned-circuit",
-      "sub_task_id": "job-550e8400",
-      "node_id": "node-identifier-of-itself",
-      "output_result_hash": "sha3-256-hash-of-the-result-state-vector",
+      "circuit_id": "abc123…",
+      "sub_task_id": "sub-task-1",
+      "node_id": "12D3Koo…",
+      "slice_id": "0",
+      "output_result_hash": "deadbeef…"
     },
-    "stark_proof_b64": "base64-encoded-zk-proof-trace",
+    "stark_proof_b64": "…"
   },
+  "work_report": {
+    "trace_rows": 42,
+    "gate_count": 2,
+    "compute_wall_ms": 12,
+    "prove_wall_ms": 340,
+    "proof_bytes": 65536
+  }
 }
 ```
 
----
+`complex_result` is the amplitude at computational basis |0…0⟩ on free wires after TN contraction.
 
-### 2. Verify Proof (`POST /verify`)
-Audit a computation result submitted by another node. This is a stateless, high-speed operation that checks the integrity of the state vector and the validity of the PoUW hash.
+### `POST /verify`
 
-**Example Request:**
+Verifies `stark_proof_b64` against the five public inputs. Does not re-run the circuit.
+
 ```json
 {
   "proof": {
-    "public_inputs": {
-      "circuit_id": "sha3-256-hash-of-the-pruned-circuit",
-      "sub_task_id": "job-550e8400",
-      "node_id": "node-identifier-of-itself",
-      "output_result_hash": "sha3-256-hash-of-the-result-state-vector",
-    },
-    "stark_proof_b64": "base64-encoded-zk-proof-trace",
-  },
+    "public_inputs": { "…": "…" },
+    "stark_proof_b64": "…"
+  }
 }
 ```
 
-**Example Response:**
-```json
-{
-  "valid": true,
-  "reason": null
-}
-```
+Success: `200` with `{ "valid": true, "reason": null }`.  
+Invalid proof: `403` with `{ "valid": false, "reason": "…" }`.
 
----
+### Error handling
 
-### Error Handling & Reliability
-`wqc-core` implements strict resource guarding to ensure node stability.
+| HTTP | When | Typical cause |
+|------|------|----------------|
+| `400` | Bad request | Invalid qubit index, Policy C mismatch, insufficient RAM for requested χ |
+| `403` | Forbidden | `/verify` — STARK transcript or public inputs invalid |
+| `500` | Internal error | Contraction or proving failure |
 
-| HTTP Code | Situation | Description |
-| :--- | :--- | :--- |
-| `400 Bad Request` | Invalid Parameters | Triggered if `memory_cost_kb` is below the absolute minimum (8 KiB) or qubit indices are out of bounds. |
-| `403 Forbidden` | Verification Failed | Triggered during `/verify` if the state hash does not match the proof or the difficulty requirement is not met. |
-| `503 Service Unavailable` | Resource Busy | **Crucial for Orchestrators**: Triggered when the requested task exceeds 70% of the currently available system memory. The Orchestrator should re-route the task to another node. |
+There is no `503` path and no `memory_cost_kb` request field (removed with Argon2 PoUW).
 
-## Requirements & Security Policy
-- **Rust**: 1.95+
-- **Memory**: 16GB+ RAM (32GB+ recommended for >29 Qubits)
-- **Dependencies**: num-complex (with serde feature), sha3
-- **Concurrency**: The node automatically manages concurrency based on real-time RAM availability. Large-scale simulations (e.g., >29 Qubits) will lock the resource until completion to prevent OOM panics.
+## Documentation
+
+- `doc/tn-engine.md` — MPS backend, χ configuration, execution flow
+- `doc/trace-spec.md` — STARK trace columns (v2, `TRACE_WIDTH = 11`)
+- `whitepaper_gap.md` — WP v0.3 alignment and remaining gaps
+
+## Requirements
+
+- **Rust**: 1.75+ (workspace uses 2021 edition)
+- **RAM**: Depends on `N` and χ; devnet compose often sets `WQC_MPS_MAX_BOND_DIM=256`
+- **Key deps**: `nalgebra` (SVD), `wqc-stark-engine` (Plonky3), `axum`, `sha3`
+
+One concurrent `/compute` per process is recommended; the node orchestrates single-task execution per core instance.
 
 ## License
-Distributed under the GNU General Public License v3.0 (GPLv3). See `LICENSE` for more information.
+
+GNU General Public License v3.0 (GPLv3). See `LICENSE`.
