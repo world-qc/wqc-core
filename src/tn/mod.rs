@@ -11,5 +11,5 @@ pub mod mps;
 pub mod trace;
 
 pub use contract::contract_slice;
-pub use gates::max_bond_dim_from_env;
+pub use gates::resolve_bond_dim;
 pub use mps::MpsState;

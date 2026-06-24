@@ -107,12 +107,20 @@ pub struct ContractionWorkspace {
 
 impl ContractionWorkspace {
     pub fn try_allocate(qubit_count: usize, original_qubit_count: usize) -> Result<Self, EngineError> {
-        let chi = crate::tn::max_bond_dim_from_env();
+        Self::try_allocate_with_bond(qubit_count, original_qubit_count, None)
+    }
+
+    pub fn try_allocate_with_bond(
+        qubit_count: usize,
+        original_qubit_count: usize,
+        mps_max_bond_dim: Option<usize>,
+    ) -> Result<Self, EngineError> {
+        let chi = crate::tn::resolve_bond_dim(mps_max_bond_dim);
         let reserved_bytes = (qubit_count as u64)
             .saturating_mul(chi as u64)
             .saturating_mul(chi as u64)
             .saturating_mul(32);
-        let state = crate::tn::MpsState::try_new(qubit_count)?;
+        let state = crate::tn::MpsState::try_new_with_bond(qubit_count, chi)?;
         Ok(Self {
             state,
             original_qubit_count,

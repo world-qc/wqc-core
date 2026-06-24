@@ -107,6 +107,15 @@ pub fn max_bond_dim_from_env() -> usize {
         .unwrap_or(128)
 }
 
+/// Per-task χ from the orchestrator, capped by the node/core env default.
+pub fn resolve_bond_dim(task_override: Option<usize>) -> usize {
+    let env = max_bond_dim_from_env();
+    match task_override.filter(|&chi| chi > 0) {
+        Some(task) => env.min(task),
+        None => env,
+    }
+}
+
 /// Bond dimension large enough for exact simulation on `qubit_count` wires.
 pub fn exact_bond_dim(qubit_count: usize) -> usize {
     1usize << (qubit_count.min(20) / 2 + 1)

@@ -20,7 +20,8 @@
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `WQC_MPS_MAX_BOND_DIM` | `128` | Maximum MPS bond dimension `χ` after each 2-qubit SVD split |
+| `WQC_MPS_MAX_BOND_DIM` | `128` | Node/core ceiling on MPS bond dimension `χ` |
+| `mps_max_bond_dim` (per task) | — | Orchestrator recommendation; effective χ = `min(env, task)` |
 
 Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense).
 
@@ -28,7 +29,7 @@ Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense
 
 ```
 POST /compute
-  → ContractionWorkspace::try_allocate (MPS, χ from env)
+  → ContractionWorkspace::try_allocate_with_bond (χ = min(env, task))
   → TensorNetwork::contract → contract_slice()
        1. Policy C boundary check
        2. |0…0⟩ product MPS
@@ -64,6 +65,7 @@ cargo test -p wqc-core
 ## Roadmap
 
 - [x] Phase 2b: MPS + bond truncation (default backend)
+- [x] Orchestrator `mps_max_bond_dim` per slice (χ recommendation)
 - [ ] Orchestrator optimal-cut hints → contraction order
 - [ ] Full dense-free trace marginals for large `N`
 - [ ] WebGPU MPS kernels (`wgpu`)

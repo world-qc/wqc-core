@@ -31,6 +31,9 @@ pub struct ComputeTask {
     pub slice_assignments: Vec<SliceAssignment>,
     /// Pruned gate list for this slice (already optimized upstream).
     pub circuit: Vec<crate::engine::Gate>,
+    /// Orchestrator-recommended MPS bond dimension χ (capped by `WQC_MPS_MAX_BOND_DIM`).
+    #[serde(default)]
+    pub mps_max_bond_dim: Option<usize>,
 }
 
 /// Successful compute response: one contracted scalar plus its STARK proof.
@@ -86,9 +89,13 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         task.original_qubit_count,
     );
 
-    // Step 1: VRAM / RAM pre-allocation and capacity guard (2^QubitCount * 16 bytes).
-    let mut workspace = ContractionWorkspace::try_allocate(task.qubit_count, task.original_qubit_count)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // Step 1: MPS workspace pre-allocation (O(N · χ²); χ from orchestrator ∩ env).
+    let mut workspace = ContractionWorkspace::try_allocate_with_bond(
+        task.qubit_count,
+        task.original_qubit_count,
+        task.mps_max_bond_dim,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Step 2: Tensor-network contraction with slice boundary conditions.
     let network = TensorNetwork::from_parts(task.qubit_count, task.circuit.clone(), task.slice_assignments)
