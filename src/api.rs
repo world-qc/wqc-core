@@ -4,6 +4,7 @@ use axum::{Json, http::StatusCode};
 use colored::*;
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
+use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 use crate::engine::{
     ComplexResult, ContractionWorkspace, SliceAssignment, TensorNetwork,
     calculate_complex_result_hash,
@@ -39,6 +40,17 @@ pub struct ComputeResponse {
     pub status: String,
     pub complex_result: ComplexResult,
     pub proof: Proof,
+    pub work_report: WorkReport,
+}
+
+/// Auditable execution metrics returned to wqc-node for D-PoUW settlement.
+#[derive(Debug, Serialize)]
+pub struct WorkReport {
+    pub trace_rows: u64,
+    pub gate_count: u32,
+    pub compute_wall_ms: u64,
+    pub prove_wall_ms: u64,
+    pub proof_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,16 +91,19 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Step 2: Tensor-network contraction with slice boundary conditions.
-    let network = TensorNetwork::from_parts(task.qubit_count, task.circuit, task.slice_assignments)
+    let network = TensorNetwork::from_parts(task.qubit_count, task.circuit.clone(), task.slice_assignments)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
+    let compute_start = std::time::Instant::now();
     let (complex_result, execution_trace) = network
         .contract(&mut workspace)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let compute_wall_ms = compute_start.elapsed().as_millis() as u64;
 
     // Step 3: Bind public inputs (circuit_id, slice_id, task_id) and emit zk-STARK proof.
     let output_result_hash = calculate_complex_result_hash(&complex_result);
 
+    let prove_start = std::time::Instant::now();
     let prover = StarkProver;
     let proof = prover
         .generate_proof(
@@ -100,6 +115,11 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             &execution_trace,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let prove_wall_ms = prove_start.elapsed().as_millis() as u64;
+
+    let trace_rows = (execution_trace.len() / TRACE_WIDTH) as u64;
+    let proof_bytes = proof.stark_proof_b64.len() as u64;
+    let gate_count = task.circuit.len() as u32;
 
     println!(
         "{} STARK proof generated for task {} — amplitude ({}, {})",
@@ -114,6 +134,13 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         status: "success".to_string(),
         complex_result,
         proof,
+        work_report: WorkReport {
+            trace_rows,
+            gate_count,
+            compute_wall_ms,
+            prove_wall_ms,
+            proof_bytes,
+        },
     }))
 }
 
