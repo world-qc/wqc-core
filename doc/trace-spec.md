@@ -1,4 +1,4 @@
-# WQC Trace Spec (v1)
+# WQC Trace Spec (v2 — multi-target AIR)
 
 This document defines the canonical STARK trace contract between `wqc-core` executors and `wqc-stark-core`.
 
@@ -7,6 +7,7 @@ This document defines the canonical STARK trace contract between `wqc-core` exec
 - Keep proof logic independent from execution backend (`CPU` now, `wgpu/WebGPU` later).
 - Allow backend migration without rewriting AIR rules.
 - Make failures debuggable by freezing row/column semantics.
+- Support **multi-target gate sequences** (e.g. `H(0)` → `CCNOT(0,1,2)`) via per-gate pre/post rows and transition links.
 
 ## Slice contract (Policy C)
 
@@ -21,22 +22,41 @@ Sub-tasks use a **compact register** after tensor slicing:
 
 The trace below is generated from the **remapped** gate list the node receives. Any CPU or `wgpu` backend must execute that list on the compact register and use the same `state[0]` readout rule for hash alignment with the orchestrator.
 
-## Row Layout (`TRACE_WIDTH = 10`)
+## Row layout (`TRACE_WIDTH = 11`)
 
-Per-step row emitted by `execute_with_trace`:
+Each gate emits **two trace rows** on the gate's **target qubit**:
 
-1. `gate_id` — see gate id table below
-2. `ctrl_active` — **discrete** `0.0` or `1.0` (marginal control probability thresholded at `0.5`)
-3. `ctrl_active_2` — second control for CCNOT (same discretization)
-4. `p_cos`
-5. `p_sin`
-6. `v0_re`
-7. `v0_im`
-8. `v1_re`
-9. `v1_im`
-10. `padding` (currently `0`)
+1. **Pre-gate row** — `gate_id` = active gate; amplitudes sampled before applying the gate.
+2. **Post-gate row** — `gate_id = 0`; amplitudes sampled after applying the gate (same target wire).
 
-The final boundary row reuses the same 10-column shape with `gate_id = 0`.
+After all gates, a **terminal boundary row** (`gate_id = 0`) samples the last gate's target qubit with `transition_link = 0`.
+
+An empty circuit emits a single terminal boundary row.
+
+### Column indices
+
+| Col | Name | Description |
+|-----|------|-------------|
+| 0 | `gate_id` | See gate id table below |
+| 1 | `ctrl_active` | Discrete `0.0` or `1.0` (marginal control probability thresholded at `0.5`) |
+| 2 | `ctrl_active_2` | Second control for CCNOT (same discretization) |
+| 3 | `p_cos` | Rotation parameter cosine |
+| 4 | `p_sin` | Rotation parameter sine |
+| 5 | `v0_re` | Target-qubit `\|0⟩` amplitude (real) |
+| 6 | `v0_im` | Target-qubit `\|0⟩` amplitude (imag) |
+| 7 | `v1_re` | Target-qubit `\|1⟩` amplitude (real) |
+| 8 | `v1_im` | Target-qubit `\|1⟩` amplitude (imag) |
+| 9 | `target_qubit` | Logical wire index sampled in columns 5–8 |
+| 10 | `transition_link` | `1.0` if the **next** row continues the same target wire; `0.0` otherwise |
+
+`transition_link` on row `i` is set by the executor after the full trace is built:
+
+- Pre → post for the same gate: `link = 1`
+- Post → next gate's pre when targets match: `link = 1`
+- Post → next gate's pre when targets differ (cross-wire): `link = 0` on the post row
+- Terminal row: `link = 0`
+
+AIR transition constraints apply only when `transition_link = 1` on the current row.
 
 ### Gate ids (`gate_id` column)
 
@@ -52,15 +72,16 @@ The final boundary row reuses the same 10-column shape with `gate_id = 0`.
 | 8 | CZ |
 | 9 | CCNOT |
 | 10–12 | RX / RY / RZ |
-| 0 | Padding / terminal boundary |
+| 0 | Padding / post-gate / terminal boundary |
 
-## AIR Expansion (`AIR_WIDTH = 19`)
+## AIR expansion (`AIR_WIDTH = 21`)
 
 `wqc-stark-core` expands each row into:
 
 - 1 gate id column
 - 10 selector columns (`X, Y, Z, H, S, T, CNOT, CZ, CCNOT, ROT`)
-- 8 payload columns (`ctrl*`, trig params, amplitudes)
+- 8 payload columns (`ctrl×2`, trig params, amplitudes×4)
+- `target_qubit` and `transition_link`
 
 Selector index for gate id `g`:
 
@@ -70,24 +91,13 @@ Selector index for gate id `g`:
 - `9` (CCNOT) → `8`
 - `10..=12` (RX/RY/RZ) → `9`
 
-## Fixed-Point Mapping
+## Fixed-point mapping
 
 - `FIXED_POINT_SCALE = 10_000.0`
 - Floating values are rounded to integer before Mersenne31 mapping.
 - Control columns are written as discrete `0` / `1` before AIR ingestion.
 
 Any backend (`CPU` / `wgpu`) must preserve this exact mapping rule for proof compatibility.
-
-### AIR transition caveat (multi-target circuits)
-
-Amplitude columns (`v0_re` … `v1_im`) are sampled on the **current row's target qubit**.
-Adjacent-row AIR constraints compare `curr` and `next` amplitude columns directly.
-When consecutive gates act on **different target wires**, those columns refer to different
-qubits and the transition sum may be non-zero even for a faithful simulator trace.
-
-Single-target circuits (e.g. repeated gates on wire `0`) and inactive controlled gates
-(`ctrl_active = 0`) satisfy AIR today. Multi-target sequences are tracked for a future
-trace-schema revision (Phase 3+).
 
 ## Proof transcript (v1)
 
@@ -98,7 +108,9 @@ trace-schema revision (Phase 3+).
 
 The verifier re-expands the embedded trace, recomputes `air_sum`, and checks `air_sum == 0` plus boundary amplitudes.
 
-## Phase 2 status
+**Breaking change**: traces produced under v1 (10 columns, one row per gate) do not verify against the v2 AIR. Devnet nodes and stark-engine must be upgraded together.
 
-Trace alignment between `wqc-core` and `wqc-stark-core` is complete. See
+## Status
+
+Trace alignment between `wqc-core` and `wqc-stark-core` is complete for multi-target circuits. See
 `wqc-stark-engine/docs/PHASE2_TRACE_ALIGNMENT.md` for the checklist and test coverage.

@@ -533,131 +533,70 @@ impl Circuit {
     }
 
     /// Executes the circuit while capturing a 10-column structured trace aligned with `wqc-stark-core`.
+    ///
+    /// Each gate emits two rows: a pre-gate snapshot (active `gate_id`) and a post-gate snapshot
+    /// (`gate_id = 0`) on the same target qubit. Column 9 records that target index so the AIR can
+    /// skip amplitude constraints on cross-wire transitions (multi-target circuits).
     pub fn execute_with_trace(&self, register: &mut QuantumRegister) -> Result<Vec<f64>, String> {
         if self.qubit_count != register.qubit_count {
             return Err("Register/circuit qubit count mismatch".to_string());
         }
 
-        let total_rows = self.gates.len() + 1;
+        let total_rows = self.gates.len() * 2 + 1;
         let mut trace = Vec::with_capacity(total_rows * TRACE_WIDTH);
 
-        // Steps 1..N: snapshot the register immediately BEFORE each gate is applied.
         for gate in &self.gates {
-            let state = &register.state;
-            let gate_id = gate.to_stark_id().unwrap_or(0.0);
-
-            // Keep trace extraction aligned with the simulator bit indexing.
-            // `apply_gate` interprets qubit ids directly as bit positions.
-            let get_phys_bit = |logical_q: usize| -> usize { logical_q };
-
-            // Columns 1 & 2: control-qubit marginal probabilities at this trace row.
-            let (ctrl_prob_1, ctrl_prob_2) = match gate {
-                Gate::CNOT(c, _) | Gate::CZ(c, _) => {
-                    let phys_ctrl = get_phys_bit(*c);
-                    let mut prob = 0.0;
-                    for (idx, amplitude) in state.iter().enumerate() {
-                        if (idx >> phys_ctrl) & 1 == 1 {
-                            prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                        }
-                    }
-                    (prob, 0.0)
-                }
-                Gate::CCNOT(c1, c2, _) => {
-                    let phys_c1 = get_phys_bit(*c1);
-                    let phys_c2 = get_phys_bit(*c2);
-                    let mut prob_1 = 0.0;
-                    let mut prob_2 = 0.0;
-                    for (idx, amplitude) in state.iter().enumerate() {
-                        let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                        if (idx >> phys_c1) & 1 == 1 { prob_1 += p; }
-                        if (idx >> phys_c2) & 1 == 1 { prob_2 += p; }
-                    }
-                    (prob_1, prob_2)
-                }
-                _ => (0.0, 0.0),
-            };
-
-            let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };
-            let ctrl_active_2 = if ctrl_prob_2 > 0.5 { 1.0 } else { 0.0 };
-
-            // Columns 3 & 4: trigonometric rotation components (RX/RY/RZ) or defaults.
-            let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
-
-            let logical_target = match gate {
-                Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
-                Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
-                Gate::CCNOT(_, _, t) => *t,
-                Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-            };
-            let phys_target = get_phys_bit(logical_target);
-
-            // Columns 5–8: dominant |v0⟩, |v1⟩ amplitude pair on the target qubit subspace.
-            let mut max_pair_prob = -1.0;
-            let mut best_v0_idx = 0;
-            let mut best_v1_idx = 0;
-            let subspace_limit = state.len() >> 1;
-
-            for s in 0..subspace_limit {
-                let low_mask = (1 << phys_target) - 1;
-                let high_bits = (s & !low_mask) << 1;
-                let low_bits = s & low_mask;
-
-                let idx_v0 = high_bits | low_bits;
-                let idx_v1 = idx_v0 | (1 << phys_target);
-
-                let p0 = state[idx_v0].re * state[idx_v0].re + state[idx_v0].im * state[idx_v0].im;
-                let p1 = state[idx_v1].re * state[idx_v1].re + state[idx_v1].im * state[idx_v1].im;
-                let combined_prob = p0 + p1;
-
-                if combined_prob > max_pair_prob {
-                    max_pair_prob = combined_prob;
-                    best_v0_idx = idx_v0;
-                    best_v1_idx = idx_v1;
-                }
-            }
-
-            let v0_re = state[best_v0_idx].re;
-            let v0_im = state[best_v0_idx].im;
-            let v1_re = state[best_v1_idx].re;
-            let v1_im = state[best_v1_idx].im;
-
-            let padding = 0.0;
-
-            trace.push(gate_id);       // Column 0
-            trace.push(ctrl_active);   // Column 1
-            trace.push(ctrl_active_2); // Column 2
-            trace.push(p_cos);         // Column 3
-            trace.push(p_sin);         // Column 4
-            trace.push(v0_re);         // Column 5
-            trace.push(v0_im);         // Column 6
-            trace.push(v1_re);         // Column 7
-            trace.push(v1_im);         // Column 8
-            trace.push(padding);       // Column 9
-
-            // Advance the simulator state for the next trace row.
+            let logical_target = gate_logical_target(gate);
+            push_gate_snapshot_row(&register.state, gate, logical_target, &mut trace);
             register.apply_gate(gate);
+            push_post_gate_row(&register.state, logical_target, &mut trace);
         }
 
-        // Step N+1: terminal boundary row (validates final register conditions for the STARK AIR).
-        let logical_target = self
+        let terminal_target = self
             .gates
             .last()
-            .map(|gate| match gate {
-                Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
-                Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
-                Gate::CCNOT(_, _, t) => *t,
-                Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-            })
+            .map(gate_logical_target)
             .unwrap_or(0);
-        push_terminal_trace_row(&register.state, logical_target, &mut trace);
+        push_terminal_trace_row(&register.state, terminal_target, &mut trace);
+        apply_transition_links(&mut trace);
 
         Ok(trace)
     }
 }
 
-fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
-    let phys_target = logical_target;
+/// Sets column 10 on each row: `1` when the next row samples the same target qubit.
+fn apply_transition_links(trace: &mut [f64]) {
+    let row_count = trace.len() / TRACE_WIDTH;
+    for row in 0..row_count {
+        let base = row * TRACE_WIDTH;
+        let link = if row + 1 < row_count {
+            let curr_target = trace[base + 9];
+            let next_target = trace[(row + 1) * TRACE_WIDTH + 9];
+            if (curr_target - next_target).abs() < f64::EPSILON {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        trace[base + 10] = link;
+    }
+}
 
+fn gate_logical_target(gate: &Gate) -> usize {
+    match gate {
+        Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::H(t) | Gate::S(t) | Gate::T(t) => *t,
+        Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
+        Gate::CCNOT(_, _, t) => *t,
+        Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
+    }
+}
+
+fn sample_target_amplitudes(
+    state: &Array1<Complex64>,
+    phys_target: usize,
+) -> (f64, f64, f64, f64) {
     let mut max_pair_prob = -1.0;
     let mut best_v0_idx = 0;
     let mut best_v1_idx = 0;
@@ -682,21 +621,129 @@ fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, tra
         }
     }
 
-    let v0_re = state[best_v0_idx].re;
-    let v0_im = state[best_v0_idx].im;
-    let v1_re = state[best_v1_idx].re;
-    let v1_im = state[best_v1_idx].im;
+    (
+        state[best_v0_idx].re,
+        state[best_v0_idx].im,
+        state[best_v1_idx].re,
+        state[best_v1_idx].im,
+    )
+}
 
-    trace.push(0.0);     // Column 0
-    trace.push(0.0);   // Column 1
-    trace.push(0.0);   // Column 2
-    trace.push(1.0);   // Column 3
-    trace.push(0.0);   // Column 4
-    trace.push(v0_re); // Column 5
-    trace.push(v0_im); // Column 6
-    trace.push(v1_re); // Column 7
-    trace.push(v1_im); // Column 8
-    trace.push(0.0);   // Column 9
+fn push_trace_row(
+    trace: &mut Vec<f64>,
+    gate_id: f64,
+    ctrl_active: f64,
+    ctrl_active_2: f64,
+    p_cos: f64,
+    p_sin: f64,
+    v0_re: f64,
+    v0_im: f64,
+    v1_re: f64,
+    v1_im: f64,
+    target_qubit: f64,
+) {
+    trace.push(gate_id);
+    trace.push(ctrl_active);
+    trace.push(ctrl_active_2);
+    trace.push(p_cos);
+    trace.push(p_sin);
+    trace.push(v0_re);
+    trace.push(v0_im);
+    trace.push(v1_re);
+    trace.push(v1_im);
+    trace.push(target_qubit);
+    trace.push(0.0); // transition_link filled by apply_transition_links
+}
+
+fn push_gate_snapshot_row(
+    state: &Array1<Complex64>,
+    gate: &Gate,
+    logical_target: usize,
+    trace: &mut Vec<f64>,
+) {
+    let gate_id = gate.to_stark_id().unwrap_or(0.0);
+    let phys_target = logical_target;
+
+    let (ctrl_prob_1, ctrl_prob_2) = match gate {
+        Gate::CNOT(c, _) | Gate::CZ(c, _) => {
+            let phys_ctrl = *c;
+            let mut prob = 0.0;
+            for (idx, amplitude) in state.iter().enumerate() {
+                if (idx >> phys_ctrl) & 1 == 1 {
+                    prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                }
+            }
+            (prob, 0.0)
+        }
+        Gate::CCNOT(c1, c2, _) => {
+            let mut prob_1 = 0.0;
+            let mut prob_2 = 0.0;
+            for (idx, amplitude) in state.iter().enumerate() {
+                let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                if (idx >> c1) & 1 == 1 {
+                    prob_1 += p;
+                }
+                if (idx >> c2) & 1 == 1 {
+                    prob_2 += p;
+                }
+            }
+            (prob_1, prob_2)
+        }
+        _ => (0.0, 0.0),
+    };
+
+    let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };
+    let ctrl_active_2 = if ctrl_prob_2 > 0.5 { 1.0 } else { 0.0 };
+    let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
+    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, phys_target);
+
+    push_trace_row(
+        trace,
+        gate_id,
+        ctrl_active,
+        ctrl_active_2,
+        p_cos,
+        p_sin,
+        v0_re,
+        v0_im,
+        v1_re,
+        v1_im,
+        logical_target as f64,
+    );
+}
+
+fn push_post_gate_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
+    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
+    push_trace_row(
+        trace,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        v0_re,
+        v0_im,
+        v1_re,
+        v1_im,
+        logical_target as f64,
+    );
+}
+
+fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
+    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
+    push_trace_row(
+        trace,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        v0_re,
+        v0_im,
+        v1_re,
+        v1_im,
+        logical_target as f64,
+    );
 }
 
 #[cfg(test)]
@@ -722,7 +769,7 @@ mod trace_tests {
         let trace = circuit
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
-        assert_eq!(trace.len(), 10, "empty circuit should emit one 10-column boundary row");
+        assert_eq!(trace.len(), 11, "empty circuit should emit one 11-column boundary row");
     }
 
     #[test]
@@ -735,25 +782,26 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        // 1 gate => 2 rows (gate snapshot + terminal boundary)
-        assert_eq!(trace.len(), 2 * TRACE_WIDTH);
+        // 1 gate => 3 rows (pre, post, terminal)
+        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
 
-        // Snapshot row
+        // Pre-gate snapshot row
         assert_approx_eq(trace_at(&trace, 0, 0), 4.0); // H gate id
-        assert_approx_eq(trace_at(&trace, 0, 1), 0.0); // ctrl_active
-        assert_approx_eq(trace_at(&trace, 0, 2), 0.0); // ctrl_active_2
-        assert_approx_eq(trace_at(&trace, 0, 3), 1.0); // p_cos default
-        assert_approx_eq(trace_at(&trace, 0, 4), 0.0); // p_sin default
+        assert_approx_eq(trace_at(&trace, 0, 9), 0.0); // target qubit
         assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // v0_re for |0>
-        assert_approx_eq(trace_at(&trace, 0, 7), 0.0); // v1_re for |1>
 
-        // Terminal boundary row (after H on |0> => both amps = 1/sqrt2)
         let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
-        assert_approx_eq(trace_at(&trace, 1, 0), 0.0); // padding/boundary
-        assert_approx_eq(trace_at(&trace, 1, 3), 1.0);
-        assert_approx_eq(trace_at(&trace, 1, 4), 0.0);
-        assert_approx_eq(trace_at(&trace, 1, 5), inv_sqrt2); // v0_re
-        assert_approx_eq(trace_at(&trace, 1, 7), inv_sqrt2); // v1_re
+        // Post-gate row
+        assert_approx_eq(trace_at(&trace, 1, 0), 0.0);
+        assert_approx_eq(trace_at(&trace, 1, 9), 0.0);
+        assert_approx_eq(trace_at(&trace, 1, 5), inv_sqrt2);
+        assert_approx_eq(trace_at(&trace, 1, 7), inv_sqrt2);
+
+        // Terminal boundary row
+        assert_approx_eq(trace_at(&trace, 2, 0), 0.0);
+        assert_approx_eq(trace_at(&trace, 2, 9), 0.0);
+        assert_approx_eq(trace_at(&trace, 2, 5), inv_sqrt2);
+        assert_approx_eq(trace_at(&trace, 2, 7), inv_sqrt2);
     }
 
     #[test]
@@ -766,17 +814,15 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        // 1 gate => 2 rows
-        assert_eq!(trace.len(), 2 * TRACE_WIDTH);
+        // 1 gate => 3 rows
+        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
 
-        // Snapshot row (before applying CNOT on |00>)
+        // Pre-gate snapshot row (before applying CNOT on |00>)
         assert_approx_eq(trace_at(&trace, 0, 0), 7.0); // CNOT gate id
         assert_approx_eq(trace_at(&trace, 0, 1), 0.0); // ctrl_active must be 0
-        assert_approx_eq(trace_at(&trace, 0, 2), 0.0); // ctrl_active_2 must be 0
-        assert_approx_eq(trace_at(&trace, 0, 3), 1.0); // p_cos default
-        assert_approx_eq(trace_at(&trace, 0, 4), 0.0); // p_sin default
-        assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // target v0_re (target=0) for |00>
-        assert_approx_eq(trace_at(&trace, 0, 7), 0.0); // target v1_re (target=1)
+        assert_approx_eq(trace_at(&trace, 0, 9), 1.0); // target qubit
+        assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // target v0_re for |00>
+        assert_approx_eq(trace_at(&trace, 0, 7), 0.0); // target v1_re
     }
 
     #[test]
@@ -791,20 +837,21 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        // 2 gates => 3 rows
-        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
+        // 2 gates => 5 rows
+        assert_eq!(trace.len(), 5 * TRACE_WIDTH);
 
-        // Snapshot row for CNOT is row=1
-        assert_approx_eq(trace_at(&trace, 1, 0), 7.0); // CNOT
-        assert_approx_eq(trace_at(&trace, 1, 1), 1.0); // ctrl_active must be 1 (marginal prob = 1.0)
-        assert_approx_eq(trace_at(&trace, 1, 2), 0.0); // ctrl_active_2 is unused => 0
-        assert_approx_eq(trace_at(&trace, 1, 5), 1.0); // target v0_re (target=0) for |01>
-        assert_approx_eq(trace_at(&trace, 1, 7), 0.0); // target v1_re (target=1)
+        // Pre-gate snapshot row for CNOT is row=2
+        assert_approx_eq(trace_at(&trace, 2, 0), 7.0); // CNOT
+        assert_approx_eq(trace_at(&trace, 2, 1), 1.0); // ctrl_active must be 1 (marginal prob = 1.0)
+        assert_approx_eq(trace_at(&trace, 2, 9), 1.0); // target qubit
+        assert_approx_eq(trace_at(&trace, 2, 5), 1.0); // target v0_re (target=0) for |01>
+        assert_approx_eq(trace_at(&trace, 2, 7), 0.0); // target v1_re (target=1)
 
         // Terminal boundary row (after CNOT -> |11>, target qubit=1 => v0_re=0, v1_re=1)
-        assert_approx_eq(trace_at(&trace, 2, 0), 0.0); // boundary
-        assert_approx_eq(trace_at(&trace, 2, 5), 0.0);
-        assert_approx_eq(trace_at(&trace, 2, 7), 1.0);
+        assert_approx_eq(trace_at(&trace, 4, 0), 0.0); // boundary
+        assert_approx_eq(trace_at(&trace, 4, 9), 1.0);
+        assert_approx_eq(trace_at(&trace, 4, 5), 0.0);
+        assert_approx_eq(trace_at(&trace, 4, 7), 1.0);
     }
 
     #[test]
@@ -819,10 +866,9 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        // 2 gates => 3 rows; CNOT snapshot is row=1
-        assert_approx_eq(trace_at(&trace, 1, 0), 7.0); // CNOT
-        assert_approx_eq(trace_at(&trace, 1, 1), 0.0); // ctrl_active should be 0 for prob == 0.5
-        assert_approx_eq(trace_at(&trace, 1, 2), 0.0);
+        // 2 gates => 5 rows; CNOT pre-gate snapshot is row=2
+        assert_approx_eq(trace_at(&trace, 2, 0), 7.0); // CNOT
+        assert_approx_eq(trace_at(&trace, 2, 1), 0.0); // ctrl_active should be 0 for prob == 0.5
     }
 
     #[test]
@@ -836,10 +882,9 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        assert_eq!(trace.len(), 3 * TRACE_WIDTH);
-        assert_approx_eq(trace_at(&trace, 1, 0), 8.0); // CZ gate id
-        assert_approx_eq(trace_at(&trace, 1, 1), 1.0); // ctrl_active discretized to 1
-        assert_approx_eq(trace_at(&trace, 1, 2), 0.0);
+        assert_eq!(trace.len(), 5 * TRACE_WIDTH);
+        assert_approx_eq(trace_at(&trace, 2, 0), 8.0); // CZ gate id (pre-gate row)
+        assert_approx_eq(trace_at(&trace, 2, 1), 1.0); // ctrl_active discretized to 1
     }
 
     #[test]
@@ -854,10 +899,11 @@ mod trace_tests {
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
 
-        assert_eq!(trace.len(), 4 * TRACE_WIDTH);
-        assert_approx_eq(trace_at(&trace, 2, 0), 9.0); // CCNOT gate id
-        assert_approx_eq(trace_at(&trace, 2, 1), 1.0); // ctrl_active
-        assert_approx_eq(trace_at(&trace, 2, 2), 1.0); // ctrl_active_2
+        assert_eq!(trace.len(), 7 * TRACE_WIDTH);
+        assert_approx_eq(trace_at(&trace, 4, 0), 9.0); // CCNOT pre-gate row
+        assert_approx_eq(trace_at(&trace, 4, 1), 1.0); // ctrl_active
+        assert_approx_eq(trace_at(&trace, 4, 2), 1.0); // ctrl_active_2
+        assert_approx_eq(trace_at(&trace, 4, 9), 2.0); // target qubit
     }
 
     #[test]
@@ -868,6 +914,10 @@ mod trace_tests {
         let cases: Vec<(&str, Vec<Gate>)> = vec![
             ("h", vec![Gate::H(0)]),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
+            (
+                "h_ccnot_devnet",
+                vec![Gate::H(0), Gate::CCNOT(0, 1, 2)],
+            ),
         ];
 
         for (name, gates) in cases {
