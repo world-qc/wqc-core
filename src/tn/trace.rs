@@ -1,20 +1,18 @@
-//! STARK execution trace emission during TN gate-by-gate contraction.
+//! STARK execution trace emission during MPS gate-by-gate contraction.
 
 use crate::engine::{EngineError, Gate};
 use ndarray::Array1;
 use num_complex::Complex64;
 use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
-use super::dense::DenseTnState;
+use super::mps::MpsState;
 
-/// Gate-by-gate contraction with pre/post trace rows (11-column schema).
+/// Gate-by-gate MPS contraction with pre/post trace rows (11-column schema).
 pub fn execute_with_trace(
     qubit_count: usize,
     gates: &[Gate],
-    state: &mut DenseTnState,
+    state: &mut MpsState,
 ) -> Result<Vec<f64>, EngineError> {
-    use crate::engine::EngineError;
-
     if qubit_count != state.qubit_count {
         return Err(EngineError::MismatchedRegister);
     }
@@ -24,13 +22,13 @@ pub fn execute_with_trace(
 
     for gate in gates {
         let logical_target = gate_logical_target(gate);
-        push_gate_snapshot_row(&state.state, gate, logical_target, &mut trace);
-        state.apply_gate(gate);
-        push_post_gate_row(&state.state, logical_target, &mut trace);
+        push_gate_snapshot_row(state, gate, logical_target, &mut trace);
+        state.apply_gate(gate)?;
+        push_post_gate_row(state, logical_target, &mut trace);
     }
 
     let terminal_target = gates.last().map(gate_logical_target).unwrap_or(0);
-    push_terminal_trace_row(&state.state, terminal_target, &mut trace);
+    push_terminal_trace_row(state, terminal_target, &mut trace);
     apply_transition_links(&mut trace);
 
     Ok(trace)
@@ -64,7 +62,15 @@ fn gate_logical_target(gate: &Gate) -> usize {
     }
 }
 
-fn sample_target_amplitudes(
+fn sample_target_amplitudes(state: &MpsState, phys_target: usize) -> (f64, f64, f64, f64) {
+    if state.qubit_count <= 16 {
+        return sample_target_from_dense(&state.to_dense_state(), phys_target);
+    }
+    let (a0, a1) = state.site_amplitudes(phys_target);
+    (a0.re, a0.im, a1.re, a1.im)
+}
+
+fn sample_target_from_dense(
     state: &Array1<Complex64>,
     phys_target: usize,
 ) -> (f64, f64, f64, f64) {
@@ -100,6 +106,46 @@ fn sample_target_amplitudes(
     )
 }
 
+fn control_probabilities(state: &MpsState, gate: &Gate) -> (f64, f64) {
+    if state.qubit_count <= 16 {
+        let dense = state.to_dense_state();
+        return match gate {
+            Gate::CNOT(c, _) | Gate::CZ(c, _) => {
+                let mut prob = 0.0;
+                for (idx, amplitude) in dense.iter().enumerate() {
+                    if (idx >> c) & 1 == 1 {
+                        prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                    }
+                }
+                (prob, 0.0)
+            }
+            Gate::CCNOT(c1, c2, _) => {
+                let mut prob_1 = 0.0;
+                let mut prob_2 = 0.0;
+                for (idx, amplitude) in dense.iter().enumerate() {
+                    let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+                    if (idx >> c1) & 1 == 1 {
+                        prob_1 += p;
+                    }
+                    if (idx >> c2) & 1 == 1 {
+                        prob_2 += p;
+                    }
+                }
+                (prob_1, prob_2)
+            }
+            _ => (0.0, 0.0),
+        };
+    }
+    match gate {
+        Gate::CNOT(c, _) | Gate::CZ(c, _) => (state.control_probability(*c), 0.0),
+        Gate::CCNOT(c1, c2, _) => (
+            state.control_probability(*c1),
+            state.control_probability(*c2),
+        ),
+        _ => (0.0, 0.0),
+    }
+}
+
 fn push_trace_row(
     trace: &mut Vec<f64>,
     gate_id: f64,
@@ -126,47 +172,13 @@ fn push_trace_row(
     trace.push(0.0);
 }
 
-fn push_gate_snapshot_row(
-    state: &Array1<Complex64>,
-    gate: &Gate,
-    logical_target: usize,
-    trace: &mut Vec<f64>,
-) {
+fn push_gate_snapshot_row(state: &MpsState, gate: &Gate, logical_target: usize, trace: &mut Vec<f64>) {
     let gate_id = gate.to_stark_id().unwrap_or(0.0);
-    let phys_target = logical_target;
-
-    let (ctrl_prob_1, ctrl_prob_2) = match gate {
-        Gate::CNOT(c, _) | Gate::CZ(c, _) => {
-            let phys_ctrl = *c;
-            let mut prob = 0.0;
-            for (idx, amplitude) in state.iter().enumerate() {
-                if (idx >> phys_ctrl) & 1 == 1 {
-                    prob += amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                }
-            }
-            (prob, 0.0)
-        }
-        Gate::CCNOT(c1, c2, _) => {
-            let mut prob_1 = 0.0;
-            let mut prob_2 = 0.0;
-            for (idx, amplitude) in state.iter().enumerate() {
-                let p = amplitude.re * amplitude.re + amplitude.im * amplitude.im;
-                if (idx >> c1) & 1 == 1 {
-                    prob_1 += p;
-                }
-                if (idx >> c2) & 1 == 1 {
-                    prob_2 += p;
-                }
-            }
-            (prob_1, prob_2)
-        }
-        _ => (0.0, 0.0),
-    };
-
+    let (ctrl_prob_1, ctrl_prob_2) = control_probabilities(state, gate);
     let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };
     let ctrl_active_2 = if ctrl_prob_2 > 0.5 { 1.0 } else { 0.0 };
     let (_, p_cos, p_sin) = gate.to_stark_payload(ctrl_active > 0.5);
-    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, phys_target);
+    let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
 
     push_trace_row(
         trace,
@@ -183,7 +195,7 @@ fn push_gate_snapshot_row(
     );
 }
 
-fn push_post_gate_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
+fn push_post_gate_row(state: &MpsState, logical_target: usize, trace: &mut Vec<f64>) {
     let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
     push_trace_row(
         trace,
@@ -200,7 +212,7 @@ fn push_post_gate_row(state: &Array1<Complex64>, logical_target: usize, trace: &
     );
 }
 
-fn push_terminal_trace_row(state: &Array1<Complex64>, logical_target: usize, trace: &mut Vec<f64>) {
+fn push_terminal_trace_row(state: &MpsState, logical_target: usize, trace: &mut Vec<f64>) {
     let (v0_re, v0_im, v1_re, v1_im) = sample_target_amplitudes(state, logical_target);
     push_trace_row(
         trace,

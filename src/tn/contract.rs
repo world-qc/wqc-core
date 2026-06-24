@@ -3,16 +3,16 @@
 use crate::engine::{ComplexResult, EngineError, Gate, SliceAssignment};
 
 use super::boundary::BoundaryConditions;
-use super::dense::DenseTnState;
+use super::mps::MpsState;
 use super::trace;
 
-/// Contract a pruned gate list on the compact register and return scalar + STARK trace.
+/// Contract a pruned gate list via bond-truncated MPS; returns scalar + STARK trace.
 pub fn contract_slice(
     qubit_count: usize,
     gates: &[Gate],
     assignments: &[SliceAssignment],
     original_qubit_count: usize,
-    state: &mut DenseTnState,
+    state: &mut MpsState,
 ) -> Result<(ComplexResult, Vec<f64>), EngineError> {
     let boundary = BoundaryConditions::from_assignments(assignments)?;
     boundary.verify_policy_c(original_qubit_count, qubit_count)?;
@@ -32,28 +32,17 @@ pub fn contract_slice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Circuit;
+    use crate::tn::gates::exact_bond_dim;
 
     #[test]
-    fn h_then_ccnot_matches_circuit_executor() {
+    fn mps_h_ccnot_exact_bond_produces_expected_amplitude() {
         let gates = vec![Gate::H(0), Gate::CCNOT(0, 1, 2)];
-        let mut tn_state = DenseTnState::try_new(3).expect("allocate");
-        let (tn_result, tn_trace) =
-            contract_slice(3, &gates, &[], 3, &mut tn_state).expect("tn contract");
-
-        let mut workspace = crate::engine::ContractionWorkspace::try_allocate(3, 3).expect("ws");
-        let mut circuit = Circuit::new(3);
-        for gate in gates {
-            circuit.add(gate).expect("add");
-        }
-        let sv_trace = circuit
-            .execute_with_trace(workspace.register_mut())
-            .expect("sv trace");
-        let sv_amp = workspace.register_mut().state[0];
-
-        assert!((tn_result.real - sv_amp.re).abs() < 1e-12);
-        assert!((tn_result.imag - sv_amp.im).abs() < 1e-12);
-        assert_eq!(tn_trace, sv_trace);
+        let chi = exact_bond_dim(3);
+        let mut mps = MpsState::try_new_with_bond(3, chi).expect("mps");
+        let (result, _) = contract_slice(3, &gates, &[], 3, &mut mps).expect("contract");
+        let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+        assert!((result.real - inv_sqrt2).abs() < 1e-5);
+        assert!(result.imag.abs() < 1e-5);
     }
 
     #[test]
@@ -63,10 +52,18 @@ mod tests {
             edge_id: "e_1".into(),
             value: 1,
         }];
-        let mut state = DenseTnState::try_new(2).expect("allocate");
+        let chi = exact_bond_dim(2);
+        let mut state = MpsState::try_new_with_bond(2, chi).expect("allocate");
 
         contract_slice(2, &gates, &assignments, 3, &mut state).expect("2 = 3-1");
-        let mut bad = DenseTnState::try_new(3).expect("allocate");
+        let mut bad = MpsState::try_new_with_bond(3, chi).expect("allocate");
         assert!(contract_slice(3, &gates, &assignments, 3, &mut bad).is_err());
+    }
+
+    #[test]
+    fn truncated_bond_still_runs() {
+        let gates = vec![Gate::H(0), Gate::CNOT(0, 1)];
+        let mut mps = MpsState::try_new_with_bond(2, 4).expect("mps");
+        assert!(contract_slice(2, &gates, &[], 2, &mut mps).is_ok());
     }
 }

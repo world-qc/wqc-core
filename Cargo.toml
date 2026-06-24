@@ -12,6 +12,8 @@ num-complex = { version = "0.4", features = ["serde"] }
 # Parallel processing for memory-bound tasks
 sysinfo = "0.30"
 rayon = "1.8"
+# MPS bond truncation (SVD)
+nalgebra = "0.33"
 # zk-STARKs Engine Integration
 wqc-stark-engine = { git = "ssh://git@github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core", features = ["plonky3-stark"] }
 p3-field = "0.6.1"

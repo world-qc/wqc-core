@@ -96,20 +96,23 @@ impl fmt::Display for EngineError {
 
 // --- Step 1: Pre-allocation workspace ---
 
-/// Working memory for tensor contraction: rank-N TN state (`2^qubit_count` amplitudes).
+/// Working memory for MPS tensor contraction (`O(N · χ²)` with bond dimension χ).
 pub struct ContractionWorkspace {
-    state: crate::tn::DenseTnState,
+    state: crate::tn::MpsState,
     /// Global circuit width before slicing; used for Policy C boundary validation.
     pub original_qubit_count: usize,
-    /// Bytes reserved up front (`2^qubit_count * 16`) to avoid fragmentation before contraction.
+    /// Rough byte estimate: `N · χ² · 32`.
     reserved_bytes: u64,
 }
 
 impl ContractionWorkspace {
-    /// Reserves `2^qubit_count * 16` bytes and rejects tasks that exceed available RAM.
     pub fn try_allocate(qubit_count: usize, original_qubit_count: usize) -> Result<Self, EngineError> {
-        let reserved_bytes = (1u64 << qubit_count).saturating_mul(16);
-        let state = crate::tn::DenseTnState::try_new(qubit_count)?;
+        let chi = crate::tn::max_bond_dim_from_env();
+        let reserved_bytes = (qubit_count as u64)
+            .saturating_mul(chi as u64)
+            .saturating_mul(chi as u64)
+            .saturating_mul(32);
+        let state = crate::tn::MpsState::try_new(qubit_count)?;
         Ok(Self {
             state,
             original_qubit_count,
@@ -230,8 +233,8 @@ impl Gate {
     }
 }
 
-/// Dense rank-N TN state used by the reference contraction backend.
-pub use crate::tn::DenseTnState as QuantumRegister;
+/// Bond-truncated MPS TN state (default contraction backend).
+pub use crate::tn::MpsState as QuantumRegister;
 
 pub struct Circuit {
     pub qubit_count: usize,
