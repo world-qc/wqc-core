@@ -77,6 +77,11 @@ pub struct SystemInfo {
     pub system_memory_used_kb: u64,
     pub system_memory_total_kb: u64,
     pub cpu_usage_percent: f32,
+    pub tn_backend_requested: String,
+    pub tn_backend_active: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tn_backend_note: Option<String>,
+    pub mps_max_bond_dim: usize,
 }
 
 // --- Handlers ---
@@ -196,9 +201,15 @@ pub async fn get_system_info() -> Json<SystemInfo> {
             .with_memory(MemoryRefreshKind::everything()),
     );
 
+    let tn = crate::tn::tn_engine_status();
+
     Json(SystemInfo {
         system_memory_used_kb: sys.used_memory() / 1024,
         system_memory_total_kb: sys.total_memory() / 1024,
         cpu_usage_percent: sys.global_cpu_info().cpu_usage(),
+        tn_backend_requested: tn.requested.clone(),
+        tn_backend_active: tn.active.clone(),
+        tn_backend_note: tn.note.clone(),
+        mps_max_bond_dim: tn.mps_max_bond_dim,
     })
 }

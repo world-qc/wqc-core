@@ -47,7 +47,6 @@ async fn main() {
                 });
             }
 
-            // Print the customized banner for Unix Domain Socket mode
             print_core_banner(connection_mode.as_str(), &socket_path);
 
             // Bind to POSIX system native local stream pipe
@@ -76,7 +75,6 @@ async fn main() {
             // Default Fallback: Standard TCP Network Mode
             let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
-            // Print the customized banner for TCP Network mode
             let url = format!("http://{}", addr);
             print_core_banner(connection_mode.as_str(), &url);
 
@@ -109,6 +107,31 @@ fn print_core_banner(mode: &str, addr: &str) {
             println!("  {} {:8} {}", "🌐", "MODE".bold(), "TCP Network Listener".bright_yellow());
             println!("  {} {:8} {}", "🔗", "ENDPOINT".bold(), addr.underline().bright_cyan());
         }
+    }
+
+    let tn = crate::tn::tn_engine_status();
+    let engine_line = if tn.requested == tn.active {
+        match tn.active.as_str() {
+            "webgpu" => "WEBGPU MPS".bright_magenta().bold().to_string(),
+            _ => "CPU MPS".bright_cyan().bold().to_string(),
+        }
+    } else {
+        format!(
+            "{} {} {}",
+            tn.requested.to_ascii_uppercase().bright_yellow(),
+            "→".dimmed(),
+            tn.active.to_ascii_uppercase().bright_red().bold()
+        )
+    };
+    println!(
+        "  {} {:8} {}  (χ≤{})",
+        "🧠".bright_magenta(),
+        "TN".bold(),
+        engine_line,
+        tn.mps_max_bond_dim
+    );
+    if let Some(note) = &tn.note {
+        println!("  {} {:8} {}", " ", "↳".dimmed(), note.italic().bright_black());
     }
     println!();
 }

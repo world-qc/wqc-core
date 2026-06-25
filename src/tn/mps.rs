@@ -16,9 +16,9 @@ use super::gates::{
 };
 
 #[cfg(feature = "webgpu")]
-use super::backend::{tn_backend_from_env, TnBackend};
-#[cfg(feature = "webgpu")]
 use super::gpu::GpuMpsDevice;
+#[cfg(feature = "webgpu")]
+use super::engine_status::shared_gpu_device;
 
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.
 pub struct MpsState {
@@ -73,15 +73,36 @@ impl MpsState {
             sites.push(tensor);
         }
 
+        #[cfg(feature = "webgpu")]
+        Self::log_backend_once();
+
         Ok(Self {
             sites,
             qubit_count,
             max_bond_dim,
             #[cfg(feature = "webgpu")]
-            gpu: init_gpu_device(),
+            gpu: shared_gpu_device(),
             #[cfg(feature = "webgpu")]
             using_webgpu: false,
         })
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn log_backend_once() {
+        use std::sync::Once;
+        static LOG_ONCE: Once = Once::new();
+        LOG_ONCE.call_once(|| {
+            let status = super::engine_status::tn_engine_status();
+            match status.active.as_str() {
+                "webgpu" => eprintln!("wqc-core: WebGPU MPS backend active"),
+                _ if status.requested == "webgpu" => {
+                    if let Some(note) = &status.note {
+                        eprintln!("wqc-core: {note}");
+                    }
+                }
+                _ => {}
+            }
+        });
     }
 
     /// Human-readable TN backend label (`cpu` or `webgpu`).
@@ -458,23 +479,6 @@ fn svd_split_two_site(
         }
     }
     truncated_svd_split(mat, max_bond, dl, dr)
-}
-
-#[cfg(feature = "webgpu")]
-fn init_gpu_device() -> Option<Arc<GpuMpsDevice>> {
-    if tn_backend_from_env() != TnBackend::WebGpu {
-        return None;
-    }
-    match GpuMpsDevice::try_new() {
-        Some(device) => {
-            eprintln!("wqc-core: WebGPU MPS backend initialized");
-            Some(device)
-        }
-        None => {
-            eprintln!("wqc-core: WebGPU adapter not found; using CPU MPS kernels");
-            None
-        }
-    }
 }
 
 #[cfg(test)]

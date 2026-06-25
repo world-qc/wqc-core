@@ -7,6 +7,7 @@ pub mod backend;
 pub mod boundary;
 pub mod contract;
 pub mod dense;
+pub mod engine_status;
 pub mod gates;
 pub mod mps;
 pub mod trace;
@@ -15,5 +16,6 @@ pub mod trace;
 pub mod gpu;
 
 pub use contract::contract_slice;
+pub use engine_status::tn_engine_status;
 pub use gates::resolve_bond_dim;
 pub use mps::MpsState;

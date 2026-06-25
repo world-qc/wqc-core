@@ -24,6 +24,13 @@
 | `mps_max_bond_dim` (per task) | — | Orchestrator recommendation; effective χ = `min(env, task)` |
 | `WQC_TN_BACKEND` | `cpu` | `cpu` or `webgpu` (requires `--features webgpu` build) |
 
+`GET /sysinfo` also returns TN probe fields for node startup banners:
+
+- `tn_backend_requested` — value of `WQC_TN_BACKEND`
+- `tn_backend_active` — `cpu` or `webgpu` after adapter probe
+- `tn_backend_note` — set when falling back (e.g. adapter not found)
+- `mps_max_bond_dim` — effective χ ceiling from env
+
 Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense).
 
 ## WebGPU backend (Phase 2c)
