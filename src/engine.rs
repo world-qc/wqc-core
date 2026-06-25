@@ -134,6 +134,14 @@ impl ContractionWorkspace {
     pub fn register_mut(&mut self) -> &mut QuantumRegister {
         &mut self.state
     }
+
+    pub fn tn_backend_label(&self) -> &'static str {
+        self.state.backend_label()
+    }
+
+    pub fn peak_vram_bytes(&self) -> u64 {
+        self.state.peak_vram_bytes()
+    }
 }
 
 // --- Step 2: Tensor network contraction executive ---
@@ -309,7 +317,8 @@ impl Circuit {
 
 #[cfg(test)]
 mod trace_tests {
-    use super::{Circuit, ContractionWorkspace, Gate, TRACE_WIDTH};
+    use super::{Circuit, ContractionWorkspace, Gate};
+    use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
     fn trace_at(trace: &[f64], row: usize, col: usize) -> f64 {
         trace[row * TRACE_WIDTH + col]

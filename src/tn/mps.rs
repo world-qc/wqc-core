@@ -1,6 +1,10 @@
 //! Bond-truncated matrix-product-state (MPS) tensor-network backend.
 //!
 //! Memory scales as `O(N · χ²)` with bond dimension `χ` (`WQC_MPS_MAX_BOND_DIM`, default 128).
+//! Set `WQC_TN_BACKEND=webgpu` (with `--features webgpu`) to offload 1-qubit and merge kernels.
+
+#[cfg(feature = "webgpu")]
+use std::sync::Arc;
 
 use crate::engine::{EngineError, Gate};
 use ndarray::{Array1, Array3, Array4};
@@ -11,11 +15,20 @@ use super::gates::{
     max_bond_dim_from_env, swap_matrix, two_qubit_matrix, unary_matrix, Mat4,
 };
 
+#[cfg(feature = "webgpu")]
+use super::backend::{tn_backend_from_env, TnBackend};
+#[cfg(feature = "webgpu")]
+use super::gpu::GpuMpsDevice;
+
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.
 pub struct MpsState {
     pub sites: Vec<Array3<Complex64>>,
     pub qubit_count: usize,
     pub max_bond_dim: usize,
+    #[cfg(feature = "webgpu")]
+    gpu: Option<Arc<GpuMpsDevice>>,
+    #[cfg(feature = "webgpu")]
+    using_webgpu: bool,
 }
 
 impl MpsState {
@@ -64,7 +77,38 @@ impl MpsState {
             sites,
             qubit_count,
             max_bond_dim,
+            #[cfg(feature = "webgpu")]
+            gpu: init_gpu_device(),
+            #[cfg(feature = "webgpu")]
+            using_webgpu: false,
         })
+    }
+
+    /// Human-readable TN backend label (`cpu` or `webgpu`).
+    pub fn backend_label(&self) -> &'static str {
+        #[cfg(feature = "webgpu")]
+        {
+            if self.using_webgpu {
+                return "webgpu";
+            }
+        }
+        "cpu"
+    }
+
+    /// Peak GPU buffer bytes observed during this state lifetime (0 on CPU-only).
+    pub fn peak_vram_bytes(&self) -> u64 {
+        #[cfg(feature = "webgpu")]
+        {
+            if let Some(ref gpu) = self.gpu {
+                return gpu.peak_vram_bytes();
+            }
+        }
+        0
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn mark_webgpu_used(&mut self) {
+        self.using_webgpu = true;
     }
 
     pub fn amplitude_at_compact_zero(&self) -> Complex64 {
@@ -104,6 +148,15 @@ impl MpsState {
     }
 
     fn apply_one_qubit(&mut self, qubit: usize, u: &[[Complex64; 2]; 2]) {
+        #[cfg(feature = "webgpu")]
+        if let Some(ref gpu) = self.gpu {
+            let site = &mut self.sites[qubit];
+            if gpu.apply_one_qubit(site, u).is_ok() {
+                self.mark_webgpu_used();
+                return;
+            }
+        }
+
         let site = &mut self.sites[qubit];
         let (left, _, right) = site.dim();
         let mut updated = Array3::<Complex64>::zeros((left, 2, right));
@@ -145,22 +198,7 @@ impl MpsState {
         let right = self.sites[q].clone();
         let dl = left.dim().0;
         let dr = right.dim().2;
-        let mut theta = Array4::<Complex64>::zeros((dl, 2, 2, dr));
-
-        for a in 0..dl {
-            for b in 0..dr {
-                for s in 0..2 {
-                    for t in 0..2 {
-                        let mut sum = Complex64::new(0.0, 0.0);
-                        let bond = left.dim().2.min(right.dim().0);
-                        for g in 0..bond {
-                            sum += left[[a, s, g]] * right[[g, t, b]];
-                        }
-                        theta[[a, s, t, b]] = sum;
-                    }
-                }
-            }
-        }
+        let theta = self.merge_two_site_tensors(&left, &right)?;
 
         let mut updated = Array4::<Complex64>::zeros((dl, 2, 2, dr));
         for a in 0..dl {
@@ -193,6 +231,39 @@ impl MpsState {
         self.sites[p] = site_l;
         self.sites[q] = site_r;
         Ok(())
+    }
+
+    fn merge_two_site_tensors(
+        &mut self,
+        left: &Array3<Complex64>,
+        right: &Array3<Complex64>,
+    ) -> Result<Array4<Complex64>, EngineError> {
+        #[cfg(feature = "webgpu")]
+        if let Some(ref gpu) = self.gpu {
+            if let Ok(theta) = gpu.merge_two_site(left, right) {
+                self.mark_webgpu_used();
+                return Ok(theta);
+            }
+        }
+
+        let dl = left.dim().0;
+        let dr = right.dim().2;
+        let bond = left.dim().2.min(right.dim().0);
+        let mut theta = Array4::<Complex64>::zeros((dl, 2, 2, dr));
+        for a in 0..dl {
+            for b in 0..dr {
+                for s in 0..2 {
+                    for t in 0..2 {
+                        let mut sum = Complex64::new(0.0, 0.0);
+                        for g in 0..bond {
+                            sum += left[[a, s, g]] * right[[g, t, b]];
+                        }
+                        theta[[a, s, t, b]] = sum;
+                    }
+                }
+            }
+        }
+        Ok(theta)
     }
 
     fn apply_swap_positions(&mut self, p: usize, q: usize) -> Result<(), EngineError> {
@@ -389,10 +460,28 @@ fn svd_split_two_site(
     truncated_svd_split(mat, max_bond, dl, dr)
 }
 
+#[cfg(feature = "webgpu")]
+fn init_gpu_device() -> Option<Arc<GpuMpsDevice>> {
+    if tn_backend_from_env() != TnBackend::WebGpu {
+        return None;
+    }
+    match GpuMpsDevice::try_new() {
+        Some(device) => {
+            eprintln!("wqc-core: WebGPU MPS backend initialized");
+            Some(device)
+        }
+        None => {
+            eprintln!("wqc-core: WebGPU adapter not found; using CPU MPS kernels");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::Gate;
+    use crate::tn::gates::exact_bond_dim;
 
     #[test]
     fn mps_h_gate_matches_dense_amplitude() {

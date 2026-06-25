@@ -54,6 +54,10 @@ pub struct WorkReport {
     pub compute_wall_ms: u64,
     pub prove_wall_ms: u64,
     pub proof_bytes: u64,
+    #[serde(default)]
+    pub tn_backend: String,
+    #[serde(default)]
+    pub vram_peak_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +151,8 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             compute_wall_ms,
             prove_wall_ms,
             proof_bytes,
+            tn_backend: workspace.tn_backend_label().to_string(),
+            vram_peak_bytes: workspace.peak_vram_bytes(),
         },
     }))
 }

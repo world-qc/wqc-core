@@ -18,8 +18,10 @@ RUN cargo build --release
 RUN rm -f target/release/deps/wqc_core*
 
 # Step 2: Build actual source code
+# Optional: docker build --build-arg WQC_FEATURES=webgpu
+ARG WQC_FEATURES=""
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --features "${WQC_FEATURES}"
 RUN cp target/release/wqc-core /usr/local/bin/
 RUN cp Cargo.lock /
 

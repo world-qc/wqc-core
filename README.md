@@ -30,7 +30,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 - [x] TN engine Phase 2a (`src/tn/`, Policy C boundaries).
 - [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
 - [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
-- [ ] WebGPU MPS kernels (`wgpu`).
+- [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
 - [ ] Distributed processing / P2P state sharding (orchestrator + node responsibility).
 
 ### Phase 3: Sovereign network (upcoming)
@@ -43,6 +43,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `WQC_MPS_MAX_BOND_DIM` | `128` | Node ceiling on MPS bond dimension χ |
+| `WQC_TN_BACKEND` | `cpu` | `webgpu` offloads 1q/merge kernels (needs `--features webgpu`) |
 | `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
@@ -71,6 +72,8 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | `slice_assignments` | `array` | Fixed legs `{ "edge_id": "e_0", "value": 0\|1 }` |
 | `circuit` | `array` | Pruned gates with local qubit indices |
 | `mps_max_bond_dim` | `int` (optional) | Orchestrator χ recommendation; effective χ = `min(this, WQC_MPS_MAX_BOND_DIM)` |
+
+`WorkReport` also returns `tn_backend` and `vram_peak_bytes` (WebGPU path).
 
 **Example request:**
 

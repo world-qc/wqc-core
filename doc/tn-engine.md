@@ -22,8 +22,24 @@
 |----------|---------|---------|
 | `WQC_MPS_MAX_BOND_DIM` | `128` | Node/core ceiling on MPS bond dimension `χ` |
 | `mps_max_bond_dim` (per task) | — | Orchestrator recommendation; effective χ = `min(env, task)` |
+| `WQC_TN_BACKEND` | `cpu` | `cpu` or `webgpu` (requires `--features webgpu` build) |
 
 Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense).
+
+## WebGPU backend (Phase 2c)
+
+Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgpu`.
+
+| Component | GPU | CPU fallback |
+|-----------|-----|----------------|
+| 1-qubit site apply | `apply_one_qubit` compute shader | native loops |
+| 2-site merge (θ tensor) | `merge_two_site` compute shader | native loops |
+| 2-qubit unitary on θ | — | native (f64) |
+| SVD bond truncation | — | `nalgebra` (f64) |
+
+`WorkReport` includes `tn_backend` (`cpu` / `webgpu`) and `vram_peak_bytes` (peak GPU buffer allocation per task).
+
+Shaders: `src/tn/gpu/shaders.wgsl`. Complex numbers use `vec2<f32>` on GPU; results are promoted to `f64` before SVD and trace emission.
 
 ## Execution flow
 
@@ -66,6 +82,5 @@ cargo test -p wqc-core
 
 - [x] Phase 2b: MPS + bond truncation (default backend)
 - [x] Orchestrator `mps_max_bond_dim` per slice (χ recommendation)
+- [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`)
 - [ ] Orchestrator optimal-cut hints → contraction order
-- [ ] Full dense-free trace marginals for large `N`
-- [ ] WebGPU MPS kernels (`wgpu`)
