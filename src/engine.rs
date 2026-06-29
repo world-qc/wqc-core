@@ -203,7 +203,7 @@ pub struct MeasureParams {
     pub cbit: usize,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, EnumIter, Display)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum Gate {
@@ -219,7 +219,7 @@ pub enum Gate {
     RY(usize, f64),
     RZ(usize, f64),
     CCNOT(usize, usize, usize),
-    Measure(MeasureParams),
+    MEASURE(MeasureParams),
 }
 
 impl Gate {
@@ -238,7 +238,7 @@ impl Gate {
             Gate::RX(..) => Some(10.0),
             Gate::RY(..) => Some(11.0),
             Gate::RZ(..) => Some(12.0),
-            Gate::Measure(_) => None,
+            Gate::MEASURE(_) => None,
         }
     }
 
@@ -308,7 +308,7 @@ impl Circuit {
                     return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
                 }
             }
-            Gate::Measure(spec) => {
+            Gate::MEASURE(spec) => {
                 if spec.qubit >= self.qubit_count {
                     return Err(EngineError::QubitIndexOutOfBounds {
                         index: spec.qubit,
@@ -521,7 +521,7 @@ mod trace_tests {
                     | Gate::RX(t, _)
                     | Gate::RY(t, _)
                     | Gate::RZ(t, _) => *t + 1,
-                    Gate::Measure(_) => 1,
+                    Gate::MEASURE(_) => 1,
                 })
                 .max()
                 .unwrap_or(1);
@@ -544,6 +544,28 @@ mod trace_tests {
                 "{name}: executor trace should satisfy AIR constraints"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_serde_tests {
+    use super::{Gate, MeasureParams};
+
+    #[test]
+    fn measure_gate_deserializes_uppercase_type_tag() {
+        let json = r#"{"type":"MEASURE","params":{"qubit":0,"cbit":1}}"#;
+        let gate: Gate = serde_json::from_str(json).expect("deserialize MEASURE");
+        assert_eq!(
+            gate,
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 1 })
+        );
+    }
+
+    #[test]
+    fn measure_gate_serializes_uppercase_type_tag() {
+        let gate = Gate::MEASURE(MeasureParams { qubit: 0, cbit: 1 });
+        let json = serde_json::to_string(&gate).expect("serialize MEASURE");
+        assert!(json.contains(r#""type":"MEASURE""#));
     }
 }
 

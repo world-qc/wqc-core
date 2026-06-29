@@ -30,13 +30,13 @@ pub struct SampleResult {
 pub fn split_unitary_and_measures(
     gates: &[Gate],
 ) -> Result<(Vec<Gate>, Vec<MeasureParams>), EngineError> {
-    let first_measure = gates.iter().position(|g| matches!(g, Gate::Measure(_)));
+    let first_measure = gates.iter().position(|g| matches!(g, Gate::MEASURE(_)));
     let Some(idx) = first_measure else {
         return Ok((gates.to_vec(), Vec::new()));
     };
 
     let (prefix, suffix) = gates.split_at(idx);
-    if prefix.iter().any(|g| matches!(g, Gate::Measure(_))) {
+    if prefix.iter().any(|g| matches!(g, Gate::MEASURE(_))) {
         return Err(EngineError::ExecutionFailed(
             "mid-circuit MEASURE is not supported in Phase A".into(),
         ));
@@ -45,7 +45,7 @@ pub fn split_unitary_and_measures(
     let mut measures = Vec::with_capacity(suffix.len());
     for gate in suffix {
         match gate {
-            Gate::Measure(spec) => measures.push(spec.clone()),
+            Gate::MEASURE(spec) => measures.push(spec.clone()),
             _ => {
                 return Err(EngineError::ExecutionFailed(
                     "gates after the first MEASURE must all be MEASURE".into(),
@@ -256,7 +256,7 @@ mod tests {
     fn mid_circuit_measure_is_rejected() {
         let gates = vec![
             Gate::H(0),
-            Gate::Measure(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
             Gate::H(0),
         ];
         let err = split_unitary_and_measures(&gates).unwrap_err().to_string();

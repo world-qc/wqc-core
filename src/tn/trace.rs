@@ -21,7 +21,7 @@ pub fn execute_with_trace(
     let mut trace = Vec::with_capacity(total_rows * TRACE_WIDTH);
 
     for gate in gates {
-        if matches!(gate, Gate::Measure(_)) {
+        if matches!(gate, Gate::MEASURE(_)) {
             continue;
         }
         let logical_target = gate_logical_target(gate);
@@ -62,7 +62,7 @@ fn gate_logical_target(gate: &Gate) -> usize {
         Gate::CNOT(_, t) | Gate::CZ(_, t) => *t,
         Gate::CCNOT(_, _, t) => *t,
         Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => *t,
-        Gate::Measure(spec) => spec.qubit,
+        Gate::MEASURE(spec) => spec.qubit,
     }
 }
 

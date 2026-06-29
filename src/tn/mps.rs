@@ -212,7 +212,7 @@ impl MpsState {
             Gate::CNOT(c, t) => self.apply_two_qubit_gate(*c, *t, &two_qubit_matrix(gate))?,
             Gate::CZ(c, t) => self.apply_two_qubit_gate(*c, *t, &two_qubit_matrix(gate))?,
             Gate::CCNOT(c1, c2, t) => self.apply_ccnot(*c1, *c2, *t)?,
-            Gate::Measure(_) => {}
+            Gate::MEASURE(_) => {}
         }
         Ok(())
     }
