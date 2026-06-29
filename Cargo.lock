@@ -2619,7 +2619,7 @@ dependencies = [
 [[package]]
 name = "wqc-stark-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/world-qc/wqc-stark-engine.git?branch=main#214145e2af424c987bcb0955df21eaee8f52ea68"
+source = "git+ssh://git@github.com/world-qc/wqc-stark-engine.git?branch=main#6aac8bb3ae948541158317b2c7ee4a2238b1dfdb"
 dependencies = [
  "p3-air",
  "p3-challenger",

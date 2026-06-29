@@ -3,7 +3,7 @@
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
-use crate::engine::{EngineError, Gate, IfParams, MeasureParams};
+use crate::engine::{EngineError, Gate, MeasureParams};
 use crate::noise::NoiseModel;
 use crate::sample::{SampleResult, outcome_key_from_classical};
 use crate::tn::dense::DenseTnState;
