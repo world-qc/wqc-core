@@ -14,7 +14,7 @@ pub struct SliceAssignment {
 }
 
 /// Final scalar after full contraction of the slice tensor network.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ComplexResult {
     pub real: f64,
     pub imag: f64,

@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::engine::{EngineError, Gate, MeasureParams};
 use crate::tn::MpsState;
 
-/// Client output mode for `/compute` (Phase A: scalar or sample histogram).
+/// Client output mode for `/compute`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     #[default]
     StatevectorScalar,
     SampleCounts,
+    Expectation,
 }
 
 /// Histogram returned for `sample_counts` mode.

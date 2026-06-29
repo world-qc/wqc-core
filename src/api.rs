@@ -10,6 +10,10 @@ use crate::engine::{
     calculate_complex_result_hash,
 };
 use crate::proof::{Proof, StarkProver};
+use crate::expectation::{
+    ExpectationResult, ObservableSpec, calculate_expectation_result_hash, compute_expectations,
+    validate_expectation_task,
+};
 use crate::sample::{
     OutputMode, SampleResult, calculate_sample_result_hash, sample_terminal_measurements,
     split_unitary_and_measures,
@@ -50,6 +54,9 @@ pub struct ComputeTask {
     /// PRNG seed for deterministic histogram reproduction.
     #[serde(default)]
     pub sample_seed: Option<u64>,
+    /// Named Pauli observables for `expectation` mode.
+    #[serde(default)]
+    pub observables: Vec<ObservableSpec>,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -62,6 +69,8 @@ pub struct ComputeResponse {
     pub complex_result: ComplexResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_result: Option<SampleResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expectation_result: Option<ExpectationResult>,
     pub proof: Proof,
     pub work_report: WorkReport,
 }
@@ -104,14 +113,23 @@ pub struct SystemInfo {
     pub mps_max_bond_dim: usize,
 }
 
-fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasureParams]) -> Result<(), String> {
-    if task.output_mode != OutputMode::SampleCounts {
-        if !measures.is_empty() {
-            return Err("circuit contains MEASURE gates but output_mode is not sample_counts".into());
+fn validate_task(
+    task: &ComputeTask,
+    measures: &[crate::engine::MeasureParams],
+) -> Result<(), String> {
+    match task.output_mode {
+        OutputMode::StatevectorScalar => {
+            if !measures.is_empty() {
+                return Err("circuit contains MEASURE gates but output_mode is not sample_counts".into());
+            }
+            Ok(())
         }
-        return Ok(());
+        OutputMode::SampleCounts => validate_sample_task(task, measures),
+        OutputMode::Expectation => validate_expectation_task(task.qubit_count, measures, &task.observables),
     }
+}
 
+fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasureParams]) -> Result<(), String> {
     if measures.is_empty() {
         return Err("sample_counts requires terminal MEASURE gates".into());
     }
@@ -160,7 +178,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
 
     let (unitary_gates, measures) =
         split_unitary_and_measures(&task.circuit).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    validate_sample_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    validate_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Step 1: MPS workspace pre-allocation (O(N · χ²); χ from orchestrator ∩ env).
     let mut workspace = ContractionWorkspace::try_allocate_with_bond(
@@ -197,11 +215,25 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         None
     };
 
+    let expectation_result = if task.output_mode == OutputMode::Expectation {
+        Some(
+            compute_expectations(workspace.register_mut(), &task.observables)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     let compute_wall_ms = compute_start.elapsed().as_millis() as u64;
 
     // Step 3: Bind public inputs and emit zk-STARK proof (unitary trace; hash binds to output mode).
     let (result_type, output_result_hash) = if let Some(ref sample) = sample_result {
         ("sample_counts".to_string(), calculate_sample_result_hash(sample))
+    } else if let Some(ref expectation) = expectation_result {
+        (
+            "expectation".to_string(),
+            calculate_expectation_result_hash(expectation),
+        )
     } else {
         (
             "statevector_scalar".to_string(),
@@ -235,6 +267,13 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             sample.counts,
             sample.shots,
         );
+    } else if let Some(ref expectation) = expectation_result {
+        println!(
+            "{} STARK proof generated for task {} — expectation {:?}",
+            "✔".green(),
+            task.task_id.bright_yellow(),
+            expectation.values,
+        );
     } else {
         println!(
             "{} STARK proof generated for task {} — amplitude ({}, {})",
@@ -251,6 +290,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         result_type,
         complex_result,
         sample_result,
+        expectation_result,
         proof,
         work_report: WorkReport {
             trace_rows,

@@ -15,6 +15,7 @@ mod engine;
 mod proof;
 mod api;
 mod sample;
+mod expectation;
 mod tn;
 
 #[tokio::main]
