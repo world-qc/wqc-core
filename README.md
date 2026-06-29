@@ -73,19 +73,23 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | `slice_assignments` | `array` | Fixed legs `{ "edge_id": "e_0", "value": 0\|1 }` |
 | `circuit` | `array` | Pruned gates with local qubit indices |
 | `mps_max_bond_dim` | `int` (optional) | Orchestrator χ recommendation; effective χ = `min(this, WQC_MPS_MAX_BOND_DIM)` |
-| `output_mode` | `string` (optional) | `statevector_scalar` (default) or `sample_counts` |
+| `output_mode` | `string` (optional) | `statevector_scalar` (default), `sample_counts`, or `expectation` |
 | `classical_bit_count` | `int` (optional) | Classical register width (`sample_counts` required) |
 | `shots` | `int` (optional) | Shot count (`sample_counts` required) |
 | `sample_seed` | `int` (optional) | PRNG seed from orchestrator (`sample_counts` required) |
+| `observables` | `array` (optional) | Pauli sums for `expectation` mode |
 
 `WorkReport` also returns `tn_backend` and `vram_peak_bytes` (WebGPU path).
 
-### `output_mode` (Phase A)
+### `output_mode` (Phase A / B)
 
 | Mode | Returns | STARK proves |
 |------|---------|--------------|
 | `statevector_scalar` | `complex_result` (amplitude at \|0…0⟩) | Unitary TN trace (unchanged) |
 | `sample_counts` | `sample_result.counts` + `shots` | Unitary TN trace only; `output_result_hash` binds canonical counts JSON |
+| `expectation` | `expectation_result.values` (Pauli sums) | Unitary TN trace only; `output_result_hash` binds canonical expectation JSON |
+
+**X/Y basis (Phase B B2)**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/basis/`.
 
 **`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.  
 **Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice + counts is Phase B (single-slice / small circuits in Phase A).

@@ -11,6 +11,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 
+mod basis;
 mod engine;
 mod proof;
 mod api;
