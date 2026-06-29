@@ -10,6 +10,10 @@ use crate::engine::{
     calculate_complex_result_hash,
 };
 use crate::proof::{Proof, StarkProver};
+use crate::sample::{
+    OutputMode, SampleResult, calculate_sample_result_hash, sample_terminal_measurements,
+    split_unitary_and_measures,
+};
 
 /// Payload received from wqc-node (matches the orchestrator's pruned sub-task shape).
 #[derive(Debug, Deserialize)]
@@ -34,14 +38,30 @@ pub struct ComputeTask {
     /// Orchestrator-recommended MPS bond dimension χ (capped by `WQC_MPS_MAX_BOND_DIM`).
     #[serde(default)]
     pub mps_max_bond_dim: Option<usize>,
+    /// Result mode (default: contracted scalar amplitude).
+    #[serde(default)]
+    pub output_mode: OutputMode,
+    /// Classical register width for terminal measurements.
+    #[serde(default)]
+    pub classical_bit_count: Option<usize>,
+    /// Shot count for `sample_counts` mode.
+    #[serde(default)]
+    pub shots: Option<u64>,
+    /// PRNG seed for deterministic histogram reproduction.
+    #[serde(default)]
+    pub sample_seed: Option<u64>,
 }
 
-/// Successful compute response: one contracted scalar plus its STARK proof.
+/// Successful compute response: scalar and/or sample histogram plus STARK proof.
 #[derive(Debug, Serialize)]
 pub struct ComputeResponse {
     pub task_id: String,
     pub status: String,
+    #[serde(rename = "result_type")]
+    pub result_type: String,
     pub complex_result: ComplexResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_result: Option<SampleResult>,
     pub proof: Proof,
     pub work_report: WorkReport,
 }
@@ -84,6 +104,46 @@ pub struct SystemInfo {
     pub mps_max_bond_dim: usize,
 }
 
+fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasureParams]) -> Result<(), String> {
+    if task.output_mode != OutputMode::SampleCounts {
+        if !measures.is_empty() {
+            return Err("circuit contains MEASURE gates but output_mode is not sample_counts".into());
+        }
+        return Ok(());
+    }
+
+    if measures.is_empty() {
+        return Err("sample_counts requires terminal MEASURE gates".into());
+    }
+
+    let classical_bit_count = task.classical_bit_count.ok_or_else(|| {
+        "classical_bit_count is required for sample_counts".to_string()
+    })?;
+    if classical_bit_count == 0 {
+        return Err("classical_bit_count must be > 0".into());
+    }
+
+    let shots = task.shots.ok_or_else(|| "shots is required for sample_counts".to_string())?;
+    if shots == 0 {
+        return Err("shots must be >= 1".into());
+    }
+
+    if task.sample_seed.is_none() {
+        return Err("sample_seed is required for sample_counts".into());
+    }
+
+    for spec in measures {
+        if spec.cbit >= classical_bit_count {
+            return Err(format!(
+                "MEASURE cbit {} out of bounds for classical_bit_count {}",
+                spec.cbit, classical_bit_count
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 // --- Handlers ---
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
@@ -98,6 +158,10 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         task.original_qubit_count,
     );
 
+    let (unitary_gates, measures) =
+        split_unitary_and_measures(&task.circuit).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    validate_sample_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
     // Step 1: MPS workspace pre-allocation (O(N · χ²); χ from orchestrator ∩ env).
     let mut workspace = ContractionWorkspace::try_allocate_with_bond(
         task.qubit_count,
@@ -106,18 +170,44 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Step 2: Tensor-network contraction with slice boundary conditions.
-    let network = TensorNetwork::from_parts(task.qubit_count, task.circuit.clone(), task.slice_assignments)
+    // Step 2: Tensor-network contraction with slice boundary conditions (unitary gates only).
+    let network = TensorNetwork::from_parts(task.qubit_count, unitary_gates.clone(), task.slice_assignments)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let compute_start = std::time::Instant::now();
     let (complex_result, execution_trace) = network
         .contract(&mut workspace)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let sample_result = if task.output_mode == OutputMode::SampleCounts {
+        let classical_bit_count = task.classical_bit_count.unwrap_or(0);
+        let shots = task.shots.unwrap_or(0);
+        let seed = task.sample_seed.unwrap_or(0);
+        Some(
+            sample_terminal_measurements(
+                workspace.register_mut(),
+                &measures,
+                classical_bit_count,
+                shots,
+                seed,
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     let compute_wall_ms = compute_start.elapsed().as_millis() as u64;
 
-    // Step 3: Bind public inputs (circuit_id, slice_id, task_id) and emit zk-STARK proof.
-    let output_result_hash = calculate_complex_result_hash(&complex_result);
+    // Step 3: Bind public inputs and emit zk-STARK proof (unitary trace; hash binds to output mode).
+    let (result_type, output_result_hash) = if let Some(ref sample) = sample_result {
+        ("sample_counts".to_string(), calculate_sample_result_hash(sample))
+    } else {
+        (
+            "statevector_scalar".to_string(),
+            calculate_complex_result_hash(&complex_result),
+        )
+    };
 
     let prove_start = std::time::Instant::now();
     let prover = StarkProver;
@@ -135,20 +225,32 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
 
     let trace_rows = (execution_trace.len() / TRACE_WIDTH) as u64;
     let proof_bytes = proof.stark_proof_b64.len() as u64;
-    let gate_count = task.circuit.len() as u32;
+    let gate_count = unitary_gates.len() as u32;
 
-    println!(
-        "{} STARK proof generated for task {} — amplitude ({}, {})",
-        "✔".green(),
-        task.task_id.bright_yellow(),
-        complex_result.real,
-        complex_result.imag,
-    );
+    if let Some(ref sample) = sample_result {
+        println!(
+            "{} STARK proof generated for task {} — sample counts {:?} ({} shots)",
+            "✔".green(),
+            task.task_id.bright_yellow(),
+            sample.counts,
+            sample.shots,
+        );
+    } else {
+        println!(
+            "{} STARK proof generated for task {} — amplitude ({}, {})",
+            "✔".green(),
+            task.task_id.bright_yellow(),
+            complex_result.real,
+            complex_result.imag,
+        );
+    }
 
     Ok(Json(ComputeResponse {
         task_id: task.task_id,
         status: "success".to_string(),
+        result_type,
         complex_result,
+        sample_result,
         proof,
         work_report: WorkReport {
             trace_rows,

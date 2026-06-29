@@ -14,6 +14,7 @@ use hyper_util::service::TowerToHyperService;
 mod engine;
 mod proof;
 mod api;
+mod sample;
 mod tn;
 
 #[tokio::main]

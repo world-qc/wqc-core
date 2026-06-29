@@ -196,6 +196,13 @@ impl TensorNetwork {
 
 // --- Gate definitions (API + STARK trace metadata) ---
 
+/// Terminal Z-basis measurement mapping (Phase A).
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct MeasureParams {
+    pub qubit: usize,
+    pub cbit: usize,
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
 #[strum(serialize_all = "UPPERCASE")]
@@ -212,6 +219,7 @@ pub enum Gate {
     RY(usize, f64),
     RZ(usize, f64),
     CCNOT(usize, usize, usize),
+    Measure(MeasureParams),
 }
 
 impl Gate {
@@ -230,6 +238,7 @@ impl Gate {
             Gate::RX(..) => Some(10.0),
             Gate::RY(..) => Some(11.0),
             Gate::RZ(..) => Some(12.0),
+            Gate::Measure(_) => None,
         }
     }
 
@@ -297,6 +306,14 @@ impl Circuit {
                 }
                 if *t >= self.qubit_count {
                     return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                }
+            }
+            Gate::Measure(spec) => {
+                if spec.qubit >= self.qubit_count {
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: spec.qubit,
+                        limit: self.qubit_count,
+                    });
                 }
             }
         }
@@ -504,6 +521,7 @@ mod trace_tests {
                     | Gate::RX(t, _)
                     | Gate::RY(t, _)
                     | Gate::RZ(t, _) => *t + 1,
+                    Gate::Measure(_) => 1,
                 })
                 .max()
                 .unwrap_or(1);

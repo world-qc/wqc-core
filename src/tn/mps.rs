@@ -132,6 +132,54 @@ impl MpsState {
         self.using_webgpu = true;
     }
 
+    /// Contract the MPS to a dense statevector (Phase A sampling; `n ≤ 20`).
+    pub fn contract_to_statevector(&self) -> Result<Vec<Complex64>, EngineError> {
+        let n = self.qubit_count;
+        if n > 20 {
+            return Err(EngineError::ExecutionFailed(
+                "full statevector projection requires qubit_count <= 20".into(),
+            ));
+        }
+
+        let mut state = vec![Complex64::ONE];
+
+        for (q_idx, site) in self.sites.iter().enumerate() {
+            let l = site.dim().0;
+            let r = site.dim().2;
+            let prefix = 1usize << q_idx;
+            if state.len() != l * prefix {
+                return Err(EngineError::ExecutionFailed(
+                    "MPS bond layout mismatch during statevector projection".into(),
+                ));
+            }
+
+            let mut next = vec![Complex64::new(0.0, 0.0); r * prefix * 2];
+            for a in 0..l {
+                for basis_prefix in 0..prefix {
+                    let src = a * prefix + basis_prefix;
+                    let v = state[src];
+                    for phys in 0..2 {
+                        for b in 0..r {
+                            let dst_basis = basis_prefix + phys * prefix;
+                            let dst = b * (prefix * 2) + dst_basis;
+                            next[dst] += v * site[[a, phys, b]];
+                        }
+                    }
+                }
+            }
+            state = next;
+        }
+
+        let expected = 1usize << n;
+        if state.len() != expected {
+            return Err(EngineError::ExecutionFailed(format!(
+                "projected statevector length {} != 2^{n}",
+                state.len()
+            )));
+        }
+        Ok(state)
+    }
+
     pub fn amplitude_at_compact_zero(&self) -> Complex64 {
         let mut vec = vec![Complex64::ONE];
         for site in &self.sites {
@@ -164,6 +212,7 @@ impl MpsState {
             Gate::CNOT(c, t) => self.apply_two_qubit_gate(*c, *t, &two_qubit_matrix(gate))?,
             Gate::CZ(c, t) => self.apply_two_qubit_gate(*c, *t, &two_qubit_matrix(gate))?,
             Gate::CCNOT(c1, c2, t) => self.apply_ccnot(*c1, *c2, *t)?,
+            Gate::Measure(_) => {}
         }
         Ok(())
     }
