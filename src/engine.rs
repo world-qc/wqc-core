@@ -203,6 +203,24 @@ pub struct MeasureParams {
     pub cbit: usize,
 }
 
+/// Classical IF gate: apply nested gate when `classical[cbit] == value` (Phase C1).
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+pub struct IfParams {
+    pub cbit: usize,
+    pub value: u8,
+    pub gate: Box<Gate>,
+}
+
+impl Default for IfParams {
+    fn default() -> Self {
+        Self {
+            cbit: 0,
+            value: 0,
+            gate: Box::new(Gate::H(0)),
+        }
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
 #[strum(serialize_all = "UPPERCASE")]
@@ -220,6 +238,10 @@ pub enum Gate {
     RZ(usize, f64),
     CCNOT(usize, usize, usize),
     MEASURE(MeasureParams),
+    /// Project qubit to |0⟩ (Phase C1).
+    RESET(usize),
+    /// Classically controlled single gate (Phase C1).
+    IF(IfParams),
 }
 
 impl Gate {
@@ -238,7 +260,7 @@ impl Gate {
             Gate::RX(..) => Some(10.0),
             Gate::RY(..) => Some(11.0),
             Gate::RZ(..) => Some(12.0),
-            Gate::MEASURE(_) => None,
+            Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => None,
         }
     }
 
@@ -315,6 +337,22 @@ impl Circuit {
                         limit: self.qubit_count,
                     });
                 }
+            }
+            Gate::RESET(q) => {
+                if *q >= self.qubit_count {
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *q,
+                        limit: self.qubit_count,
+                    });
+                }
+            }
+            Gate::IF(params) => {
+                if params.value > 1 {
+                    return Err(EngineError::ExecutionFailed(
+                        "IF value must be 0 or 1".into(),
+                    ));
+                }
+                self.add(*params.gate.clone())?;
             }
         }
         self.gates.push(gate);
@@ -520,8 +558,8 @@ mod trace_tests {
                     | Gate::T(t)
                     | Gate::RX(t, _)
                     | Gate::RY(t, _)
-                    | Gate::RZ(t, _) => *t + 1,
-                    Gate::MEASURE(_) => 1,
+                    |                     Gate::RZ(t, _) => *t + 1,
+                    Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => 1,
                 })
                 .max()
                 .unwrap_or(1);

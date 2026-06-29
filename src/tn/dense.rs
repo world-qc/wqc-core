@@ -100,7 +100,7 @@ impl DenseTnState {
                 self.apply_unary(*t, |v0, v1| (v0 * exp_p, v1 * exp_m));
             }
             Gate::CCNOT(c1, c2, t) => self.apply_ccnot(*c1, *c2, *t),
-            Gate::MEASURE(_) => {}
+            Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => {}
         }
     }
 

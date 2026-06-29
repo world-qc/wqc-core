@@ -127,14 +127,22 @@ pub fn compute_outcome_probabilities(
 }
 
 fn outcome_key(basis_index: usize, measures: &[MeasureParams], classical_bit_count: usize) -> String {
-    let mut bits = vec![b'0'; classical_bit_count];
+    let mut bits = vec![0u8; classical_bit_count];
     for spec in measures {
         let bit = (basis_index >> spec.qubit) & 1;
-        // Qiskit convention: rightmost character is cbit 0 (and typically qubit 0).
-        let pos = classical_bit_count - 1 - spec.cbit;
-        bits[pos] = if bit == 1 { b'1' } else { b'0' };
+        bits[spec.cbit] = bit as u8;
     }
-    // SAFETY: bits are only ASCII '0'/'1'.
+    outcome_key_from_classical(&bits)
+}
+
+/// Build a Qiskit-order bitstring from classical register contents (`cbit 0` = rightmost).
+pub fn outcome_key_from_classical(classical: &[u8]) -> String {
+    let n = classical.len();
+    let mut bits = vec![b'0'; n];
+    for (cbit, &val) in classical.iter().enumerate() {
+        let pos = n - 1 - cbit;
+        bits[pos] = if val == 1 { b'1' } else { b'0' };
+    }
     unsafe { String::from_utf8_unchecked(bits) }
 }
 

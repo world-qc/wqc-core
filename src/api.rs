@@ -14,6 +14,12 @@ use crate::expectation::{
     ExpectationResult, ObservableSpec, calculate_expectation_result_hash, compute_expectations,
     validate_expectation_task,
 };
+use crate::distribution_proof::distribution_stark_status;
+use crate::mid_circuit::{
+    extract_unitary_gates_for_proof, sample_mid_circuit_measurements, uses_mid_circuit_semantics,
+    validate_phase_c_sample_circuit,
+};
+use crate::noise::NoiseModel;
 use crate::sample::{
     OutputMode, SampleResult, calculate_sample_result_hash, sample_terminal_measurements,
     split_unitary_and_measures,
@@ -57,6 +63,9 @@ pub struct ComputeTask {
     /// Named Pauli observables for `expectation` mode.
     #[serde(default)]
     pub observables: Vec<ObservableSpec>,
+    /// Optional noise model for trajectory sampling (Phase C3; not STARK-bound).
+    #[serde(default)]
+    pub noise_model: Option<NoiseModel>,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -73,6 +82,8 @@ pub struct ComputeResponse {
     pub expectation_result: Option<ExpectationResult>,
     pub proof: Proof,
     pub work_report: WorkReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution_proof: Option<crate::distribution_proof::DistributionProofStatus>,
 }
 
 /// Auditable execution metrics returned to wqc-node for D-PoUW settlement.
@@ -131,7 +142,7 @@ fn validate_task(
 
 fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasureParams]) -> Result<(), String> {
     if measures.is_empty() {
-        return Err("sample_counts requires terminal MEASURE gates".into());
+        return Err("sample_counts requires at least one MEASURE gate".into());
     }
 
     let classical_bit_count = task.classical_bit_count.ok_or_else(|| {
@@ -140,6 +151,9 @@ fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasurePa
     if classical_bit_count == 0 {
         return Err("classical_bit_count must be > 0".into());
     }
+
+    validate_phase_c_sample_circuit(&task.circuit, classical_bit_count)
+        .map_err(|e| e.to_string())?;
 
     let shots = task.shots.ok_or_else(|| "shots is required for sample_counts".to_string())?;
     if shots == 0 {
@@ -150,12 +164,16 @@ fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasurePa
         return Err("sample_seed is required for sample_counts".into());
     }
 
-    for spec in measures {
-        if spec.cbit >= classical_bit_count {
-            return Err(format!(
-                "MEASURE cbit {} out of bounds for classical_bit_count {}",
-                spec.cbit, classical_bit_count
-            ));
+    if let Some(noise) = &task.noise_model {
+        if let Some(p) = noise.depolarizing_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err("depolarizing_p must be in [0, 1]".into());
+            }
+        }
+        if let Some(p) = noise.readout_error {
+            if !(0.0..=1.0).contains(&p) {
+                return Err("readout_error must be in [0, 1]".into());
+            }
         }
     }
 
@@ -176,9 +194,16 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         task.original_qubit_count,
     );
 
-    let (unitary_gates, measures) =
-        split_unitary_and_measures(&task.circuit).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let measures = crate::mid_circuit::collect_measures(&task.circuit);
     validate_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let unitary_gates = if uses_mid_circuit_semantics(&task.circuit) {
+        extract_unitary_gates_for_proof(&task.circuit)
+    } else {
+        let (unitary, _) =
+            split_unitary_and_measures(&task.circuit).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        unitary
+    };
 
     // Step 1: MPS workspace pre-allocation (O(N · χ²); χ from orchestrator ∩ env).
     let mut workspace = ContractionWorkspace::try_allocate_with_bond(
@@ -201,16 +226,28 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         let classical_bit_count = task.classical_bit_count.unwrap_or(0);
         let shots = task.shots.unwrap_or(0);
         let seed = task.sample_seed.unwrap_or(0);
-        Some(
+        Some(if uses_mid_circuit_semantics(&task.circuit) {
+            sample_mid_circuit_measurements(
+                &task.circuit,
+                task.qubit_count,
+                classical_bit_count,
+                shots,
+                seed,
+                task.noise_model.as_ref(),
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            let (_, terminal_measures) = split_unitary_and_measures(&task.circuit)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
             sample_terminal_measurements(
                 workspace.register_mut(),
-                &measures,
+                &terminal_measures,
                 classical_bit_count,
                 shots,
                 seed,
             )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
-        )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        })
     } else {
         None
     };
@@ -301,6 +338,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
+        distribution_proof: Some(distribution_stark_status()),
     }))
 }
 

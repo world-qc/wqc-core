@@ -17,6 +17,9 @@ mod proof;
 mod api;
 mod sample;
 mod expectation;
+mod mid_circuit;
+mod noise;
+mod distribution_proof;
 mod tn;
 
 #[tokio::main]

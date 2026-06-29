@@ -54,7 +54,7 @@ pub fn terminal_measure_in_basis(
 mod tests {
     use super::*;
     use crate::engine::{Circuit, ContractionWorkspace, Gate};
-    use crate::expectation::compute_expectations;
+    use crate::expectation::{ComplexCoeff, ObservableSpec, PauliTerm, compute_expectations};
     use crate::sample::sample_terminal_measurements;
 
     #[test]
