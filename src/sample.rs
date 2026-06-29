@@ -129,7 +129,9 @@ fn outcome_key(basis_index: usize, measures: &[MeasureParams], classical_bit_cou
     let mut bits = vec![b'0'; classical_bit_count];
     for spec in measures {
         let bit = (basis_index >> spec.qubit) & 1;
-        bits[spec.cbit] = if bit == 1 { b'1' } else { b'0' };
+        // Qiskit convention: rightmost character is cbit 0 (and typically qubit 0).
+        let pos = classical_bit_count - 1 - spec.cbit;
+        bits[pos] = if bit == 1 { b'1' } else { b'0' };
     }
     // SAFETY: bits are only ASCII '0'/'1'.
     unsafe { String::from_utf8_unchecked(bits) }
@@ -187,6 +189,20 @@ pub fn sample_terminal_measurements(
 mod tests {
     use super::*;
     use crate::engine::{Circuit, ContractionWorkspace, Gate};
+
+    #[test]
+    fn outcome_key_uses_qiskit_bit_order() {
+        let measures = vec![
+            MeasureParams { qubit: 0, cbit: 0 },
+            MeasureParams { qubit: 1, cbit: 1 },
+        ];
+        // |01⟩: q0=1, q1=0 → Qiskit "01" (rightmost char = cbit 0 = q0)
+        let key = outcome_key(0b01, &measures, 2);
+        assert_eq!(key, "01");
+        // |10⟩: q0=0, q1=1 → Qiskit "10"
+        let key = outcome_key(0b10, &measures, 2);
+        assert_eq!(key, "10");
+    }
 
     #[test]
     fn bell_state_terminal_measure_produces_00_and_11() {

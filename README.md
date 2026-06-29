@@ -20,7 +20,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 
 ### Phase 1: Foundation (completed)
 
-- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT (Toffoli decomposition in MPS).
+- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT, **MEASURE** (terminal Z-basis, Phase A).
 - Compute → prove → verify cycle with cross-language hash alignment (Rust / Go).
 - HTTP API over Unix domain socket (default) or TCP.
 
@@ -31,6 +31,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 - [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
 - [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
+- [x] **Phase A execution model (§3.4)**: `sample_counts`, terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
 - [ ] Distributed processing / P2P state sharding (orchestrator + node responsibility).
 
 ### Phase 3: Sovereign network (upcoming)
@@ -72,8 +73,56 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | `slice_assignments` | `array` | Fixed legs `{ "edge_id": "e_0", "value": 0\|1 }` |
 | `circuit` | `array` | Pruned gates with local qubit indices |
 | `mps_max_bond_dim` | `int` (optional) | Orchestrator χ recommendation; effective χ = `min(this, WQC_MPS_MAX_BOND_DIM)` |
+| `output_mode` | `string` (optional) | `statevector_scalar` (default) or `sample_counts` |
+| `classical_bit_count` | `int` (optional) | Classical register width (`sample_counts` required) |
+| `shots` | `int` (optional) | Shot count (`sample_counts` required) |
+| `sample_seed` | `int` (optional) | PRNG seed from orchestrator (`sample_counts` required) |
 
 `WorkReport` also returns `tn_backend` and `vram_peak_bytes` (WebGPU path).
+
+### `output_mode` (Phase A)
+
+| Mode | Returns | STARK proves |
+|------|---------|--------------|
+| `statevector_scalar` | `complex_result` (amplitude at \|0…0⟩) | Unitary TN trace (unchanged) |
+| `sample_counts` | `sample_result.counts` + `shots` | Unitary TN trace only; `output_result_hash` binds canonical counts JSON |
+
+**`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.  
+**Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice + counts is Phase B (single-slice / small circuits in Phase A).
+
+**Example `sample_counts` circuit** (Bell state):
+
+```json
+{
+  "output_mode": "sample_counts",
+  "classical_bit_count": 2,
+  "shots": 1024,
+  "sample_seed": 42,
+  "circuit": [
+    { "type": "H", "params": [0] },
+    { "type": "CNOT", "params": [0, 1] },
+    { "type": "MEASURE", "params": { "qubit": 0, "cbit": 0 } },
+    { "type": "MEASURE", "params": { "qubit": 1, "cbit": 1 } }
+  ]
+}
+```
+
+**Example response (`sample_counts`)**:
+
+```json
+{
+  "task_id": "sub-task-1",
+  "status": "success",
+  "result_type": "sample_counts",
+  "complex_result": { "real": 0.7071067811865475, "imag": 0.0 },
+  "sample_result": {
+    "counts": { "00": 512, "11": 512 },
+    "shots": 1024
+  },
+  "proof": { "…": "…" },
+  "work_report": { "…": "…" }
+}
+```
 
 **Example request:**
 
