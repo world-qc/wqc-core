@@ -268,7 +268,7 @@ fn normalize_dense(state: &mut DenseTnState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Gate;
+    use crate::engine::{Gate, IfParams};
 
     #[test]
     fn mid_circuit_measure_then_conditional_x() {

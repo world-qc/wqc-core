@@ -17,24 +17,68 @@ pub fn execute_with_trace(
         return Err(EngineError::MismatchedRegister);
     }
 
-    let total_rows = gates.len() * 2 + 1;
-    let mut trace = Vec::with_capacity(total_rows * TRACE_WIDTH);
-
-    for gate in gates {
+    let mut trace = Vec::new();
+    let mut i = 0;
+    while i < gates.len() {
+        let gate = &gates[i];
         if matches!(gate, Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_)) {
+            i += 1;
             continue;
         }
-        let logical_target = gate_logical_target(gate);
-        push_gate_snapshot_row(state, gate, logical_target, &mut trace);
-        state.apply_gate(gate)?;
-        push_post_gate_row(state, logical_target, &mut trace);
+
+        if let Some(run) = consecutive_h_run(&gates[i..]) {
+            let traced = run % 2;
+            let silent = run - traced;
+            for gate in &gates[i..i + silent] {
+                state.apply_gate(gate)?;
+            }
+            if traced == 1 {
+                emit_gate_trace(state, gates[i].clone(), &mut trace)?;
+            }
+            i += run;
+            continue;
+        }
+
+        emit_gate_trace(state, gate.clone(), &mut trace)?;
+        i += 1;
     }
 
-    let terminal_target = gates.last().map(gate_logical_target).unwrap_or(0);
+    let terminal_target = gates
+        .iter()
+        .rev()
+        .find(|g| !matches!(g, Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_)))
+        .map(gate_logical_target)
+        .unwrap_or(0);
     push_terminal_trace_row(state, terminal_target, &mut trace);
     apply_transition_links(&mut trace);
 
     Ok(trace)
+}
+
+fn consecutive_h_run(gates: &[Gate]) -> Option<usize> {
+    let Gate::H(target) = gates.first()? else {
+        return None;
+    };
+    let mut run = 1usize;
+    while run < gates.len() {
+        match &gates[run] {
+            Gate::H(t) if t == target => run += 1,
+            _ => break,
+        }
+    }
+    Some(run)
+}
+
+fn emit_gate_trace(
+    state: &mut MpsState,
+    gate: Gate,
+    trace: &mut Vec<f64>,
+) -> Result<(), EngineError> {
+    let logical_target = gate_logical_target(&gate);
+    push_gate_snapshot_row(state, &gate, logical_target, trace);
+    state.apply_gate(&gate)?;
+    push_post_gate_row(state, logical_target, trace);
+    Ok(())
 }
 
 fn apply_transition_links(trace: &mut [f64]) {
