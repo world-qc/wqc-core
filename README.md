@@ -32,7 +32,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 - [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
 - [x] **Phase A execution model (§3.4)**: `sample_counts`, terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
-- [ ] Distributed processing / P2P state sharding (orchestrator + node responsibility).
+- [x] **Swarm slice delivery (§3.1)**: orchestrator + `wqc-node` responsibility (Policy C split → libp2p dispatch → 1 core = 1 slice). MPI-style in-core state sharding is not a whitepaper goal.
 
 ### Phase 3: Sovereign network (upcoming)
 
