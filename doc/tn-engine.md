@@ -88,6 +88,7 @@ cargo test -p wqc-core
 ## Roadmap
 
 - [x] Phase 2b: MPS + bond truncation (default backend)
-- [x] Orchestrator `mps_max_bond_dim` per slice (χ recommendation)
+- [x] Orchestrator `mps_max_bond_dim` per slice (χ recommendation + bond proxy cap)
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`)
-- [ ] Orchestrator optimal-cut hints → contraction order
+- [x] Orchestrator TN cut heuristics Phase A/B (`circuit/tn_cut.go` in `wqc-orchestrator`)
+- [ ] TN strict min-cut / contraction order hints (`wqc-core` MPS path order)
