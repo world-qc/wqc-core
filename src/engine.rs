@@ -539,6 +539,13 @@ mod trace_tests {
         let cases: Vec<(&str, Vec<Gate>)> = vec![
             ("h", vec![Gate::H(0)]),
             ("h_h_x_basis", vec![Gate::H(0), Gate::H(0)]),
+            (
+                "rx_rx_y_basis",
+                vec![
+                    Gate::RX(0, std::f64::consts::FRAC_PI_2),
+                    Gate::RX(0, -std::f64::consts::FRAC_PI_2),
+                ],
+            ),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
             (
                 "h_ccnot_devnet",

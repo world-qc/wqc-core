@@ -39,6 +39,21 @@ pub fn execute_with_trace(
             continue;
         }
 
+        if let Some(run) = consecutive_rx_run(&gates[i..]) {
+            let angle_sum = rx_angle_sum(&gates[i..i + run]);
+            if is_identity_rotation(angle_sum) {
+                for gate in &gates[i..i + run] {
+                    state.apply_gate(gate)?;
+                }
+            } else {
+                for gate in &gates[i..i + run] {
+                    emit_gate_trace(state, gate.clone(), &mut trace)?;
+                }
+            }
+            i += run;
+            continue;
+        }
+
         emit_gate_trace(state, gate.clone(), &mut trace)?;
         i += 1;
     }
@@ -67,6 +82,35 @@ fn consecutive_h_run(gates: &[Gate]) -> Option<usize> {
         }
     }
     Some(run)
+}
+
+fn consecutive_rx_run(gates: &[Gate]) -> Option<usize> {
+    let Gate::RX(target, _) = gates.first()? else {
+        return None;
+    };
+    let mut run = 1usize;
+    while run < gates.len() {
+        match &gates[run] {
+            Gate::RX(t, _) if t == target => run += 1,
+            _ => break,
+        }
+    }
+    Some(run)
+}
+
+fn rx_angle_sum(gates: &[Gate]) -> f64 {
+    gates
+        .iter()
+        .filter_map(|gate| match gate {
+            Gate::RX(_, angle) => Some(*angle),
+            _ => None,
+        })
+        .sum()
+}
+
+fn is_identity_rotation(angle_sum: f64) -> bool {
+    let reduced = angle_sum.rem_euclid(std::f64::consts::TAU);
+    reduced.abs() < 1e-9 || (std::f64::consts::TAU - reduced).abs() < 1e-9
 }
 
 fn emit_gate_trace(

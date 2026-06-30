@@ -58,6 +58,22 @@ An empty circuit emits a single terminal boundary row.
 
 AIR transition constraints apply only when `transition_link = 1` on the current row.
 
+### Consecutive unary gates (trace fold)
+
+Fixed-point Hadamard / rotation constraints can fail when **both** target amplitudes are
+non-zero (e.g. `H(0); H(0)` on |0⟩ passes through |+⟩). Executors therefore **fold** runs
+before emitting trace rows:
+
+| Pattern | MPS execution | Trace emission |
+| --- | --- | --- |
+| `H(t)^n` (n even) | apply all n gates | no rows (H∘H = I) |
+| `H(t)^n` (n odd) | apply all n gates | one H pre/post pair |
+| `RX(t,θ₁)…RX(t,θₖ)` with Σθᵢ ≡ 0 (mod 2π) | apply all | no rows (net identity) |
+| `RX` run with non-zero net angle | apply all | one pre/post pair per gate (unchanged) |
+
+Physics (MPS state) always applies the full gate list. Trace folding is an AIR-encoding
+detail only; proofs bind `output_result_hash` from the executed state.
+
 ### Gate ids (`gate_id` column)
 
 | Id | Gate |
