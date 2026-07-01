@@ -15,7 +15,8 @@ use crate::expectation::{
     validate_expectation_task,
 };
 use crate::distribution_proof::{
-    build_terminal_distribution_segment, distribution_stark_status, distribution_stark_status_bound,
+    build_terminal_distribution_segment, distribution_stark_status, distribution_stark_status_born_air,
+    distribution_stark_status_bound,
 };
 use crate::mid_circuit::{
     extract_unitary_gates_for_proof, sample_mid_circuit_measurements, uses_mid_circuit_semantics,
@@ -364,7 +365,12 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
-        distribution_proof: Some(if distribution_segment.is_some() {
+        distribution_proof: Some(if distribution_segment
+            .as_ref()
+            .is_some_and(|s| s.born_binding.is_some())
+        {
+            distribution_stark_status_born_air()
+        } else if distribution_segment.is_some() {
             distribution_stark_status_bound()
         } else {
             distribution_stark_status()

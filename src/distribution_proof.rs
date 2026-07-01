@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use wqc_stark_engine::DistributionSegment;
+use wqc_stark_engine::{BornBinding, DistributionSegment};
 
 use crate::engine::MeasureParams;
 use crate::sample::compute_outcome_probabilities;
@@ -30,6 +30,14 @@ pub fn distribution_stark_status_bound() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: true,
         scheme: "born_deterministic_v1",
+    }
+}
+
+/// Phase C2b — terminal statevector Born-rule binding in the distribution segment.
+pub fn distribution_stark_status_born_air() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "born_air_v1",
     }
 }
 
@@ -97,6 +105,7 @@ pub fn distribution_segment_from_probabilities(
         measurement_spec_hash,
         probability_digest,
         probabilities,
+        born_binding: None,
     }
 }
 
@@ -116,12 +125,28 @@ pub fn build_terminal_distribution_segment(
         classical_bit_count,
     )?;
     let measurement_spec_hash = calculate_measurement_spec_hash(measures);
-    Ok(distribution_segment_from_probabilities(
+    let measure_pairs: Vec<(u32, u32)> = measures
+        .iter()
+        .map(|m| (m.qubit as u32, m.cbit as u32))
+        .collect();
+    let terminal_statevector: Vec<(f64, f64)> = statevector
+        .iter()
+        .map(|c| (c.re, c.im))
+        .collect();
+    let born_binding = BornBinding::from_specs(
+        state.qubit_count as u32,
+        classical_bit_count as u32,
+        &measure_pairs,
+        terminal_statevector,
+    );
+    let mut segment = distribution_segment_from_probabilities(
         probabilities,
         shots,
         sample_seed,
         measurement_spec_hash,
-    ))
+    );
+    segment.born_binding = born_binding;
+    Ok(segment)
 }
 
 fn format_go_float(val: f64) -> String {
@@ -245,5 +270,61 @@ mod tests {
             format_go_probability_json(&table),
             r#"{"probabilities":{}}"#
         );
+    }
+
+    #[test]
+    fn terminal_segment_embeds_born_binding_for_bell() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit.add(Gate::CNOT(0, 1)).expect("cnot");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+
+        let measures = vec![
+            MeasureParams { qubit: 0, cbit: 0 },
+            MeasureParams { qubit: 1, cbit: 1 },
+        ];
+        let segment = build_terminal_distribution_segment(
+            workspace.register_mut(),
+            &measures,
+            2,
+            1024,
+            42,
+        )
+        .expect("segment");
+        let binding = segment.born_binding.as_ref().expect("born binding");
+        assert_eq!(binding.qubit_count, 2);
+        assert_eq!(binding.classical_bit_count, 2);
+        assert_eq!(binding.terminal_statevector.len(), 4);
+        assert_eq!(binding.measures, vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn executor_traces_satisfy_born_constraints() {
+        use wqc_stark_engine::air::distribution::evaluate_born_constraint_sum;
+
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit.add(Gate::CNOT(0, 1)).expect("cnot");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+
+        let measures = vec![
+            MeasureParams { qubit: 0, cbit: 0 },
+            MeasureParams { qubit: 1, cbit: 1 },
+        ];
+        let segment = build_terminal_distribution_segment(
+            workspace.register_mut(),
+            &measures,
+            2,
+            256,
+            99,
+        )
+        .expect("segment");
+        assert_eq!(evaluate_born_constraint_sum(&segment), 0);
     }
 }
