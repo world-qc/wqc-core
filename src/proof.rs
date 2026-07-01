@@ -229,7 +229,7 @@ mod integration_tests {
             .expect("split")
             .1
             .expect("tail present");
-        assert!(!tail.is_empty());
+        assert!(!tail.0.is_empty());
 
         let mut tampered = proof_bytes.clone();
         let last = tampered.len() - 1;

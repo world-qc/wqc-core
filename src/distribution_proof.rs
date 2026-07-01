@@ -59,11 +59,34 @@ pub fn calculate_probability_digest(table: &OutcomeProbabilities) -> String {
     hex::encode(Sha3_256::digest(format_go_probability_json(table).as_bytes()))
 }
 
-/// Builds a transcript distribution segment from Born probabilities (C2a-2).
+/// Canonical measurement-spec JSON — must match orchestrator `FormatMeasurementSpecJSON`.
+pub fn format_measurement_spec_json(measures: &[MeasureParams]) -> String {
+    let mut specs: Vec<(u32, u32)> = measures
+        .iter()
+        .map(|m| (m.qubit as u32, m.cbit as u32))
+        .collect();
+    specs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let parts: Vec<String> = specs
+        .into_iter()
+        .map(|(qubit, cbit)| format!(r#"{{"cbit":{cbit},"qubit":{qubit}}}"#))
+        .collect();
+    format!(r#"{{"measures":[{}]}}"#, parts.join(","))
+}
+
+/// SHA3-256 hex digest of the canonical measurement spec JSON (C2a-4).
+pub fn calculate_measurement_spec_hash(measures: &[MeasureParams]) -> String {
+    use sha3::{Digest, Sha3_256};
+    hex::encode(Sha3_256::digest(
+        format_measurement_spec_json(measures).as_bytes(),
+    ))
+}
+
+/// Builds a transcript distribution segment from Born probabilities (C2a-2/4).
 pub fn distribution_segment_from_probabilities(
     probabilities: BTreeMap<String, f64>,
     shots: u64,
     sample_seed: u64,
+    measurement_spec_hash: String,
 ) -> DistributionSegment {
     let table = OutcomeProbabilities { probabilities };
     let probability_digest = calculate_probability_digest(&table);
@@ -71,6 +94,7 @@ pub fn distribution_segment_from_probabilities(
     DistributionSegment {
         sample_seed,
         shots,
+        measurement_spec_hash,
         probability_digest,
         probabilities,
     }
@@ -91,10 +115,12 @@ pub fn build_terminal_distribution_segment(
         measures,
         classical_bit_count,
     )?;
+    let measurement_spec_hash = calculate_measurement_spec_hash(measures);
     Ok(distribution_segment_from_probabilities(
         probabilities,
         shots,
         sample_seed,
+        measurement_spec_hash,
     ))
 }
 
@@ -187,6 +213,28 @@ mod tests {
             calculate_probability_digest(&OutcomeProbabilities {
                 probabilities: table.probabilities.clone(),
             })
+        );
+    }
+
+    #[test]
+    fn measurement_spec_hash_matches_orchestrator_bell_order() {
+        let measures = vec![
+            MeasureParams { qubit: 1, cbit: 1 },
+            MeasureParams { qubit: 0, cbit: 0 },
+        ];
+        let json = format_measurement_spec_json(&measures);
+        assert_eq!(
+            json,
+            r#"{"measures":[{"cbit":0,"qubit":0},{"cbit":1,"qubit":1}]}"#
+        );
+        let hash = calculate_measurement_spec_hash(&measures);
+        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            calculate_measurement_spec_hash(&[
+                MeasureParams { qubit: 0, cbit: 0 },
+                MeasureParams { qubit: 1, cbit: 1 },
+            ]),
+            hash
         );
     }
 
