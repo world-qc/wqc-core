@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
-    append_distribution_tail, generate_plonky3_stark_proof, verify_stark_proof_core,
-    DistributionSegment, StarkContext as EngineContext,
+    append_born_stark_tail, append_distribution_tail, generate_born_stark_proof,
+    generate_plonky3_stark_proof, segment_supports_born_zk, verify_stark_proof_core,
+    BornStarkContext, DistributionSegment, StarkContext as EngineContext,
 };
 use base64::{engine::general_purpose, Engine as _};
 
@@ -63,6 +64,14 @@ impl StarkProver {
 
         if let Some(segment) = distribution {
             proof_bytes = append_distribution_tail(proof_bytes, segment);
+            if segment_supports_born_zk(segment) {
+                let born_ctx = BornStarkContext {
+                    sub_task_id: task_id,
+                    probability_digest: &segment.probability_digest,
+                };
+                let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
+                proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
+            }
         }
 
         let stark_proof_b64 = general_purpose::STANDARD.encode(&proof_bytes);

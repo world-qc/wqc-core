@@ -33,11 +33,19 @@ pub fn distribution_stark_status_bound() -> DistributionProofStatus {
     }
 }
 
-/// Phase C2b — terminal statevector Born-rule binding in the distribution segment.
+/// Phase C2b — terminal statevector Born-rule binding (algebraic verify).
 pub fn distribution_stark_status_born_air() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: true,
         scheme: "born_air_v1",
+    }
+}
+
+/// Phase C2b zk — Born-rule constraints proved in Plonky3 `DistributionAir`.
+pub fn distribution_stark_status_born_air_zk() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "born_air_zk_v1",
     }
 }
 
