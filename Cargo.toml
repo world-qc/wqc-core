@@ -44,6 +44,10 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 default = []
 webgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
+# Monorepo local override (no-op when `wqc-stark-engine/` is absent, e.g. Docker-only build).
+[patch."ssh://git@github.com/world-qc/wqc-stark-engine.git"]
+wqc-stark-core = { path = "../wqc-stark-engine/wqc-stark-core" }
+
 [profile.release]
 opt-level = 3
 lto = true

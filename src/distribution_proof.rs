@@ -6,6 +6,11 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use wqc_stark_engine::DistributionSegment;
+
+use crate::engine::MeasureParams;
+use crate::sample::compute_outcome_probabilities;
+use crate::tn::MpsState;
 
 /// Born-rule outcome probabilities for terminal Z measurements (support outcomes only).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -18,6 +23,14 @@ pub struct OutcomeProbabilities {
 pub struct DistributionProofStatus {
     pub bound: bool,
     pub scheme: &'static str,
+}
+
+/// Phase C2a-2 — terminal `sample_counts` with Born probabilities in the transcript tail.
+pub fn distribution_stark_status_bound() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "born_deterministic_v1",
+    }
 }
 
 /// Phase C2 placeholder — quorum still uses canonical `counts` hash (seed-fixed).
@@ -44,6 +57,45 @@ pub fn format_go_probability_json(table: &OutcomeProbabilities) -> String {
 pub fn calculate_probability_digest(table: &OutcomeProbabilities) -> String {
     use sha3::{Digest, Sha3_256};
     hex::encode(Sha3_256::digest(format_go_probability_json(table).as_bytes()))
+}
+
+/// Builds a transcript distribution segment from Born probabilities (C2a-2).
+pub fn distribution_segment_from_probabilities(
+    probabilities: BTreeMap<String, f64>,
+    shots: u64,
+    sample_seed: u64,
+) -> DistributionSegment {
+    let table = OutcomeProbabilities { probabilities };
+    let probability_digest = calculate_probability_digest(&table);
+    let probabilities: Vec<(String, f64)> = table.probabilities.into_iter().collect();
+    DistributionSegment {
+        sample_seed,
+        shots,
+        probability_digest,
+        probabilities,
+    }
+}
+
+/// Computes Born probabilities from a post-unitary MPS state and packs a distribution segment.
+pub fn build_terminal_distribution_segment(
+    state: &MpsState,
+    measures: &[MeasureParams],
+    classical_bit_count: usize,
+    shots: u64,
+    sample_seed: u64,
+) -> Result<DistributionSegment, crate::engine::EngineError> {
+    let statevector = state.contract_to_statevector()?;
+    let probabilities = compute_outcome_probabilities(
+        &statevector,
+        state.qubit_count,
+        measures,
+        classical_bit_count,
+    )?;
+    Ok(distribution_segment_from_probabilities(
+        probabilities,
+        shots,
+        sample_seed,
+    ))
 }
 
 fn format_go_float(val: f64) -> String {

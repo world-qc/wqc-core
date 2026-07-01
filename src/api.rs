@@ -14,7 +14,9 @@ use crate::expectation::{
     ExpectationResult, ObservableSpec, calculate_expectation_result_hash, compute_expectations,
     validate_expectation_task,
 };
-use crate::distribution_proof::distribution_stark_status;
+use crate::distribution_proof::{
+    build_terminal_distribution_segment, distribution_stark_status, distribution_stark_status_bound,
+};
 use crate::mid_circuit::{
     extract_unitary_gates_for_proof, sample_mid_circuit_measurements, uses_mid_circuit_semantics,
     validate_phase_c_sample_circuit,
@@ -279,6 +281,29 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
     };
 
     let prove_start = std::time::Instant::now();
+    let distribution_segment = if task.output_mode == OutputMode::SampleCounts
+        && !uses_mid_circuit_semantics(&task.circuit)
+        && task.noise_model.is_none()
+    {
+        let classical_bit_count = task.classical_bit_count.unwrap_or(0) as usize;
+        let shots = task.shots.unwrap_or(0);
+        let seed = task.sample_seed.unwrap_or(0);
+        let (_, terminal_measures) = split_unitary_and_measures(&task.circuit)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        Some(
+            build_terminal_distribution_segment(
+                workspace.register_mut(),
+                &terminal_measures,
+                classical_bit_count,
+                shots,
+                seed,
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     let prover = StarkProver;
     let proof = prover
         .generate_proof(
@@ -288,6 +313,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             &task.slice_id,
             &output_result_hash,
             &execution_trace,
+            distribution_segment.as_ref(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let prove_wall_ms = prove_start.elapsed().as_millis() as u64;
@@ -338,7 +364,11 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
-        distribution_proof: Some(distribution_stark_status()),
+        distribution_proof: Some(if distribution_segment.is_some() {
+            distribution_stark_status_bound()
+        } else {
+            distribution_stark_status()
+        }),
     }))
 }
 
