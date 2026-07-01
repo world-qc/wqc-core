@@ -245,6 +245,22 @@ mod tests {
     }
 
     #[test]
+    fn golden_sample_counts_for_orchestrator_crosscheck() {
+        let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+        let mut circuit = Circuit::new(1);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+
+        let measures = vec![MeasureParams { qubit: 0, cbit: 0 }];
+        let sample = sample_terminal_measurements(workspace.register_mut(), &measures, 1, 256, 99)
+            .expect("sample");
+        assert_eq!(sample.counts.get("0").copied(), Some(118));
+        assert_eq!(sample.counts.get("1").copied(), Some(138));
+    }
+
+    #[test]
     fn sample_seed_is_reproducible() {
         let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
         let mut circuit = Circuit::new(1);
