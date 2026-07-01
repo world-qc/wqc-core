@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
-    append_born_stark_tail, append_distribution_tail, append_trajectory_tail,
-    generate_born_stark_proof, generate_plonky3_stark_proof, segment_supports_born_zk,
+    append_born_stark_tail, append_distribution_tail, append_trajectory_stark_tail,
+    append_trajectory_tail, generate_born_stark_proof, generate_plonky3_stark_proof,
+    generate_trajectory_stark_bundle, segment_supports_born_zk, segment_supports_trajectory_zk,
     verify_stark_proof_core, BornStarkContext, DistributionSegment, StarkContext as EngineContext,
     TrajectorySegment,
 };
@@ -55,6 +56,10 @@ impl StarkProver {
             .and_then(|seg| seg.born_binding.as_ref())
             .map(|b| b.terminal_statevector_digest.as_str())
             .unwrap_or("");
+        let traj_link = trajectory
+            .map(|seg| seg.unitary_link_digest.as_str())
+            .filter(|digest| !digest.is_empty())
+            .unwrap_or("");
 
         let context = EngineContext {
             circuit_id,
@@ -62,7 +67,11 @@ impl StarkProver {
             node_id,
             slice_id,
             output_hash,
-            terminal_statevector_digest: sv_digest,
+            terminal_statevector_digest: if !traj_link.is_empty() {
+                traj_link
+            } else {
+                sv_digest
+            },
         };
 
         let mut proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
@@ -85,6 +94,10 @@ impl StarkProver {
 
         if let Some(segment) = trajectory {
             proof_bytes = append_trajectory_tail(proof_bytes, segment);
+            if segment_supports_trajectory_zk(segment) {
+                let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
+                proof_bytes = append_trajectory_stark_tail(proof_bytes, &bundle);
+            }
         }
 
         let stark_proof_b64 = general_purpose::STANDARD.encode(&proof_bytes);

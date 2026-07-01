@@ -46,6 +46,8 @@ pub struct TrajectoryMeasureEvent {
     pub p0: f64,
     pub p1: f64,
     pub outcome: u8,
+    /// Dense pre-measure statevector amplitudes (C2c marginal binding).
+    pub pre_measure_statevector: Vec<(f64, f64)>,
 }
 
 /// One deterministic trajectory shot (seed-fixed).
@@ -241,6 +243,11 @@ fn simulate_one_shot_with_trace(
     for (gate_index, gate) in gates.iter().enumerate() {
         match gate {
             Gate::MEASURE(spec) => {
+                let pre_measure_statevector: Vec<(f64, f64)> = state
+                    .state
+                    .iter()
+                    .map(|amp| (amp.re, amp.im))
+                    .collect();
                 let (p0, p1) = z_marginal(&state, spec.qubit);
                 let mut outcome = if rng.gen::<f64>() < p0 / (p0 + p1).max(1e-30) {
                     0
@@ -259,6 +266,7 @@ fn simulate_one_shot_with_trace(
                     p0,
                     p1,
                     outcome,
+                    pre_measure_statevector,
                 });
             }
             Gate::RESET(q) => reset_qubit(&mut state, *q),

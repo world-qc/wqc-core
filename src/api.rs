@@ -20,7 +20,8 @@ use crate::distribution_proof::{
     distribution_stark_status_bound,
 };
 use crate::trajectory_proof::{
-    build_trajectory_segment, distribution_stark_status_trajectory_bound,
+    build_trajectory_segment, distribution_stark_status_trajectory_air_zk,
+    distribution_stark_status_trajectory_air_zk_linked, distribution_stark_status_trajectory_bound,
 };
 use crate::mid_circuit::{
     extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
@@ -322,6 +323,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             crate::distribution_proof::calculate_measurement_spec_hash(&measures);
         Some(build_trajectory_segment(
             trace,
+            task.qubit_count as u32,
             task.sample_seed.unwrap_or(0),
             task.shots.unwrap_or(0),
             measurement_spec_hash,
@@ -391,7 +393,17 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
-        distribution_proof: Some(if trajectory_segment.is_some() {
+        distribution_proof: Some(if trajectory_segment.as_ref().is_some_and(|s| {
+            wqc_stark_engine::segment_supports_trajectory_zk(s)
+                && !s.unitary_link_digest.is_empty()
+        }) {
+            distribution_stark_status_trajectory_air_zk_linked()
+        } else if trajectory_segment
+            .as_ref()
+            .is_some_and(|s| wqc_stark_engine::segment_supports_trajectory_zk(s))
+        {
+            distribution_stark_status_trajectory_air_zk()
+        } else if trajectory_segment.is_some() {
             distribution_stark_status_trajectory_bound()
         } else if distribution_segment.as_ref().is_some_and(|s| {
             wqc_stark_engine::segment_supports_born_zk(s)

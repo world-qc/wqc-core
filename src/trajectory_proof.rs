@@ -1,7 +1,10 @@
 //! Phase C2c: mid-circuit trajectory binding for noiseless `sample_counts`.
 
+use std::collections::BTreeMap;
+
 use wqc_stark_engine::{
-    calculate_trajectory_digest, TrajectoryMeasureEvent, TrajectorySegment, TrajectoryShotTrace,
+    calculate_terminal_statevector_digest, calculate_trajectory_digest, TrajectoryMarginalWitness,
+    TrajectoryMeasureEvent, TrajectorySegment, TrajectoryShotTrace,
 };
 
 use crate::distribution_proof::DistributionProofStatus;
@@ -15,13 +18,60 @@ pub fn distribution_stark_status_trajectory_bound() -> DistributionProofStatus {
     }
 }
 
+/// Phase C2c zk — per-MEASURE Z marginals proved in Plonky3 `DistributionAir`.
+pub fn distribution_stark_status_trajectory_air_zk() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "trajectory_air_zk_v1",
+    }
+}
+
+/// Phase C2c zk linked — trajectory marginal zk + unitary v2 `unitary_link_digest` bridge.
+pub fn distribution_stark_status_trajectory_air_zk_linked() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "trajectory_air_zk_linked_v1",
+    }
+}
+
+fn collect_marginal_witnesses(
+    trace: &TrajectoryTrace,
+    qubit_count: u32,
+) -> (Vec<TrajectoryMarginalWitness>, String) {
+    let mut by_key: BTreeMap<(String, u32), TrajectoryMarginalWitness> = BTreeMap::new();
+    let mut unitary_link = String::new();
+
+    for shot in &trace.traces {
+        for (measure_index, m) in shot.measures.iter().enumerate() {
+            let digest = calculate_terminal_statevector_digest(&m.pre_measure_statevector);
+            if unitary_link.is_empty() && shot.shot_index == 0 && measure_index == 0 {
+                unitary_link = digest.clone();
+            }
+            by_key
+                .entry((digest.clone(), m.qubit as u32))
+                .or_insert_with(|| TrajectoryMarginalWitness {
+                    qubit: m.qubit as u32,
+                    reference_p0: m.p0,
+                    reference_p1: m.p1,
+                    pre_measure_statevector: m.pre_measure_statevector.clone(),
+                    pre_measure_statevector_digest: digest,
+                });
+        }
+    }
+
+    let _ = qubit_count;
+    (by_key.into_values().collect(), unitary_link)
+}
+
 /// Builds a trajectory segment from a sampled mid-circuit trace.
 pub fn build_trajectory_segment(
     trace: &TrajectoryTrace,
+    qubit_count: u32,
     sample_seed: u64,
     shots: u64,
     measurement_spec_hash: String,
 ) -> TrajectorySegment {
+    let (marginal_witnesses, unitary_link_digest) = collect_marginal_witnesses(trace, qubit_count);
     let traces: Vec<TrajectoryShotTrace> = trace
         .traces
         .iter()
@@ -33,13 +83,18 @@ pub fn build_trajectory_segment(
             measures: shot
                 .measures
                 .iter()
-                .map(|m| TrajectoryMeasureEvent {
-                    gate_index: m.gate_index as u32,
-                    qubit: m.qubit as u32,
-                    cbit: m.cbit as u32,
-                    p0: m.p0,
-                    p1: m.p1,
-                    outcome: m.outcome,
+                .map(|m| {
+                    let digest =
+                        calculate_terminal_statevector_digest(&m.pre_measure_statevector);
+                    TrajectoryMeasureEvent {
+                        gate_index: m.gate_index as u32,
+                        qubit: m.qubit as u32,
+                        cbit: m.cbit as u32,
+                        p0: m.p0,
+                        p1: m.p1,
+                        outcome: m.outcome,
+                        pre_measure_statevector_digest: digest,
+                    }
                 })
                 .collect(),
         })
@@ -50,7 +105,10 @@ pub fn build_trajectory_segment(
         shots,
         measurement_spec_hash,
         trajectory_digest,
+        qubit_count,
+        unitary_link_digest,
         traces,
+        marginal_witnesses,
     }
 }
 
@@ -59,7 +117,7 @@ mod tests {
     use super::*;
     use crate::engine::{Gate, IfParams, MeasureParams};
     use crate::mid_circuit::sample_mid_circuit_measurements_with_trace;
-    use wqc_stark_engine::format_trajectory_json;
+    use wqc_stark_engine::{format_trajectory_json, segment_supports_trajectory_zk};
 
     #[test]
     fn trajectory_digest_matches_stark_engine_json() {
@@ -75,7 +133,7 @@ mod tests {
         ];
         let (_, trace) =
             sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 2, 7, None).expect("trace");
-        let segment = build_trajectory_segment(&trace, 7, 2, "spec".into());
+        let segment = build_trajectory_segment(&trace, 2, 7, 2, "spec".into());
         let stark_traces: Vec<TrajectoryShotTrace> = segment.traces.clone();
         assert_eq!(
             segment.trajectory_digest,
@@ -83,5 +141,8 @@ mod tests {
         );
         assert!(format_trajectory_json(&stark_traces).contains(r#""trajectory""#));
         assert_eq!(segment.traces.len(), 2);
+        assert!(segment_supports_trajectory_zk(&segment));
+        assert!(!segment.unitary_link_digest.is_empty());
+        assert!(!segment.marginal_witnesses.is_empty());
     }
 }
