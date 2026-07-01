@@ -1,6 +1,17 @@
-//! Phase C2 scaffolding: measurement-distribution STARK binding (not yet implemented).
+//! Phase C2: measurement-distribution binding (Born probabilities + deterministic sampling).
+//!
+//! C2a-1 defines the cross-crate `probability_digest` contract used by `wqc-orchestrator`
+//! and `wqc-core`. Keys are Qiskit-order bitstrings (same as `sample_counts`).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Born-rule outcome probabilities for terminal Z measurements (support outcomes only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OutcomeProbabilities {
+    pub probabilities: BTreeMap<String, f64>,
+}
 
 /// Reports whether the STARK transcript binds sampled counts beyond unitary trace.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -14,5 +25,125 @@ pub fn distribution_stark_status() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: false,
         scheme: "unitary_trace_only",
+    }
+}
+
+/// Canonical JSON for SHA3-256 hashing — must match orchestrator `FormatProbabilityJSON`.
+pub fn format_go_probability_json(table: &OutcomeProbabilities) -> String {
+    let mut pairs = String::new();
+    for (key, value) in &table.probabilities {
+        if !pairs.is_empty() {
+            pairs.push(',');
+        }
+        pairs.push_str(&format!(r#""{key}":{}"#, format_go_float(*value)));
+    }
+    format!(r#"{{"probabilities":{{{pairs}}}}}"#)
+}
+
+/// SHA3-256 hex digest of the canonical probability JSON (`probability_digest`).
+pub fn calculate_probability_digest(table: &OutcomeProbabilities) -> String {
+    use sha3::{Digest, Sha3_256};
+    hex::encode(Sha3_256::digest(format_go_probability_json(table).as_bytes()))
+}
+
+fn format_go_float(val: f64) -> String {
+    if val == (val as i64) as f64 {
+        format!("{:.1}", val)
+    } else {
+        format!("{val}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Circuit, ContractionWorkspace, Gate, MeasureParams};
+    use crate::sample::compute_outcome_probabilities;
+
+    #[test]
+    fn probability_json_uses_sorted_keys_and_go_float_style() {
+        let table = OutcomeProbabilities {
+            probabilities: BTreeMap::from([
+                ("11".into(), 0.5),
+                ("00".into(), 0.5),
+            ]),
+        };
+        assert_eq!(
+            format_go_probability_json(&table),
+            r#"{"probabilities":{"00":0.5,"11":0.5}}"#
+        );
+    }
+
+    #[test]
+    fn probability_digest_matches_orchestrator_golden_bell() {
+        let table = OutcomeProbabilities {
+            probabilities: BTreeMap::from([
+                ("00".into(), 0.5),
+                ("11".into(), 0.5),
+            ]),
+        };
+        assert_eq!(
+            calculate_probability_digest(&table),
+            "ef8f4691ad99dc93489c72d6a5863df7974ce1d0c1ad58525c133c15d43190fc"
+        );
+    }
+
+    #[test]
+    fn probability_digest_integer_one_uses_one_point_zero() {
+        let table = OutcomeProbabilities {
+            probabilities: BTreeMap::from([("0".into(), 1.0)]),
+        };
+        assert_eq!(
+            format_go_probability_json(&table),
+            r#"{"probabilities":{"0":1.0}}"#
+        );
+        assert_eq!(
+            calculate_probability_digest(&table),
+            "b3de34846864135b2fc5dc4cfc94c950b8e4c95b98015ba3e09fa46ada453e20"
+        );
+    }
+
+    #[test]
+    fn bell_state_probabilities_match_compute_outcome_probabilities() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit.add(Gate::CNOT(0, 1)).expect("cnot");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+
+        let statevector = workspace.register_mut().contract_to_statevector().expect("dense");
+        let measures = vec![
+            MeasureParams { qubit: 0, cbit: 0 },
+            MeasureParams { qubit: 1, cbit: 1 },
+        ];
+        let probs = compute_outcome_probabilities(&statevector, 2, &measures, 2).expect("probs");
+        let table = OutcomeProbabilities {
+            probabilities: probs,
+        };
+        let p00 = table.probabilities.get("00").copied().unwrap_or(0.0);
+        let p11 = table.probabilities.get("11").copied().unwrap_or(0.0);
+        assert!((p00 - 0.5).abs() < 1e-9, "p(00)={p00}");
+        assert!((p11 - 0.5).abs() < 1e-9, "p(11)={p11}");
+        assert_eq!(table.probabilities.len(), 2);
+        // Digest is defined on formatted floats from simulation (may differ from hand-crafted 0.5 literals).
+        let json = format_go_probability_json(&table);
+        assert!(json.contains(r#""00""#) && json.contains(r#""11""#));
+        assert_eq!(
+            calculate_probability_digest(&table),
+            calculate_probability_digest(&OutcomeProbabilities {
+                probabilities: table.probabilities.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn empty_support_yields_empty_object() {
+        let table = OutcomeProbabilities::default();
+        assert_eq!(
+            format_go_probability_json(&table),
+            r#"{"probabilities":{}}"#
+        );
     }
 }
