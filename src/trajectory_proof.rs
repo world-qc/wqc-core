@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use wqc_stark_engine::{
-    calculate_terminal_statevector_digest, calculate_trajectory_digest, TrajectoryMarginalWitness,
-    TrajectoryMeasureEvent, TrajectorySegment, TrajectoryShotTrace,
+    calculate_terminal_statevector_digest, calculate_trajectory_digest, canonicalize_terminal_statevector,
+    z_marginal_from_statevector, TrajectoryMarginalWitness, TrajectoryMeasureEvent,
+    TrajectorySegment, TrajectoryShotTrace,
 };
 
 use crate::distribution_proof::DistributionProofStatus;
@@ -43,7 +44,14 @@ fn collect_marginal_witnesses(
 
     for shot in &trace.traces {
         for (measure_index, m) in shot.measures.iter().enumerate() {
-            let digest = calculate_terminal_statevector_digest(&m.pre_measure_statevector);
+            let canonical = canonicalize_terminal_statevector(&m.pre_measure_statevector);
+            let digest = calculate_terminal_statevector_digest(&canonical);
+            let (reference_p0, reference_p1) = z_marginal_from_statevector(
+                &canonical,
+                m.qubit,
+                qubit_count as usize,
+            )
+            .unwrap_or((m.p0, m.p1));
             if unitary_link.is_empty() && shot.shot_index == 0 && measure_index == 0 {
                 unitary_link = digest.clone();
             }
@@ -51,15 +59,14 @@ fn collect_marginal_witnesses(
                 .entry((digest.clone(), m.qubit as u32))
                 .or_insert_with(|| TrajectoryMarginalWitness {
                     qubit: m.qubit as u32,
-                    reference_p0: m.p0,
-                    reference_p1: m.p1,
-                    pre_measure_statevector: m.pre_measure_statevector.clone(),
+                    reference_p0,
+                    reference_p1,
+                    pre_measure_statevector: canonical,
                     pre_measure_statevector_digest: digest,
                 });
         }
     }
 
-    let _ = qubit_count;
     (by_key.into_values().collect(), unitary_link)
 }
 
@@ -84,8 +91,8 @@ pub fn build_trajectory_segment(
                 .measures
                 .iter()
                 .map(|m| {
-                    let digest =
-                        calculate_terminal_statevector_digest(&m.pre_measure_statevector);
+                    let canonical = canonicalize_terminal_statevector(&m.pre_measure_statevector);
+                    let digest = calculate_terminal_statevector_digest(&canonical);
                     TrajectoryMeasureEvent {
                         gate_index: m.gate_index as u32,
                         qubit: m.qubit as u32,
@@ -117,7 +124,11 @@ mod tests {
     use super::*;
     use crate::engine::{Gate, IfParams, MeasureParams};
     use crate::mid_circuit::sample_mid_circuit_measurements_with_trace;
-    use wqc_stark_engine::{format_trajectory_json, segment_supports_trajectory_zk};
+    use wqc_stark_engine::{
+        append_trajectory_stark_tail, append_trajectory_tail, decode_and_verify_trajectory_tail,
+        format_trajectory_json, generate_trajectory_stark_bundle, segment_supports_trajectory_zk,
+        TRAJ_V2_MARKER,
+    };
 
     #[test]
     fn trajectory_digest_matches_stark_engine_json() {
@@ -144,5 +155,42 @@ mod tests {
         assert!(segment_supports_trajectory_zk(&segment));
         assert!(!segment.unitary_link_digest.is_empty());
         assert!(!segment.marginal_witnesses.is_empty());
+    }
+
+    #[test]
+    fn if_demo_512_shots_marginal_constraints_and_zk_roundtrip() {
+        let gates = vec![
+            Gate::H(0),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::X(1)),
+            }),
+            Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
+        ];
+        let (_, trace) = sample_mid_circuit_measurements_with_trace(
+            &gates, 2, 2, 512, 42, None,
+        )
+        .expect("trace");
+        let segment = build_trajectory_segment(&trace, 2, 42, 512, "spec".into());
+        assert!(segment_supports_trajectory_zk(&segment));
+
+        let payload = {
+            let proof = append_trajectory_tail(Vec::new(), &segment);
+            let (_, tail) = wqc_stark_engine::split_trajectory_tail(&proof).expect("split");
+            let (payload, _) = tail.expect("tail");
+            payload.to_vec()
+        };
+        let decoded =
+            decode_and_verify_trajectory_tail(&payload, TRAJ_V2_MARKER).expect("decode segment");
+        assert_eq!(decoded.trajectory_digest, segment.trajectory_digest);
+
+        let bundle = generate_trajectory_stark_bundle("sub-traj", &segment).expect("zk prove");
+        let mut proof = append_trajectory_tail(Vec::new(), &segment);
+        proof = append_trajectory_stark_tail(proof, &bundle);
+        let (_, tail) = wqc_stark_engine::split_trajectory_tail(&proof).expect("split");
+        let (payload, marker) = tail.expect("tail");
+        decode_and_verify_trajectory_tail(payload, marker).expect("verify after tail wrap");
     }
 }
