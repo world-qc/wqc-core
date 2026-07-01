@@ -20,6 +20,7 @@ mod expectation;
 mod mid_circuit;
 mod noise;
 mod distribution_proof;
+mod trajectory_proof;
 mod tn;
 
 #[tokio::main]

@@ -2,6 +2,7 @@
 
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::{EngineError, Gate, MeasureParams};
 use crate::noise::NoiseModel;
@@ -34,6 +35,34 @@ pub fn collect_measures(gates: &[Gate]) -> Vec<MeasureParams> {
             _ => None,
         })
         .collect()
+}
+
+/// One observed MEASURE event during a single trajectory shot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrajectoryMeasureEvent {
+    pub gate_index: usize,
+    pub qubit: usize,
+    pub cbit: usize,
+    pub p0: f64,
+    pub p1: f64,
+    pub outcome: u8,
+}
+
+/// One deterministic trajectory shot (seed-fixed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrajectoryShotTrace {
+    pub shot_index: u64,
+    pub shot_seed: u64,
+    pub final_outcome: String,
+    pub classical_bits: Vec<u8>,
+    pub measures: Vec<TrajectoryMeasureEvent>,
+}
+
+/// Full mid-circuit trajectory trace across all sampled shots.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrajectoryTrace {
+    pub shots: u64,
+    pub traces: Vec<TrajectoryShotTrace>,
 }
 
 /// Gates included in the unitary STARK trace (non-destructive / non-classical controls).
@@ -146,6 +175,26 @@ pub fn sample_mid_circuit_measurements(
     seed: u64,
     noise: Option<&NoiseModel>,
 ) -> Result<SampleResult, EngineError> {
+    let (sample, _trace) = sample_mid_circuit_measurements_with_trace(
+        gates,
+        qubit_count,
+        classical_bit_count,
+        shots,
+        seed,
+        noise,
+    )?;
+    Ok(sample)
+}
+
+/// Deterministic shot-by-shot simulation plus per-shot trajectory trace (C2c foundation).
+pub fn sample_mid_circuit_measurements_with_trace(
+    gates: &[Gate],
+    qubit_count: usize,
+    classical_bit_count: usize,
+    shots: u64,
+    seed: u64,
+    noise: Option<&NoiseModel>,
+) -> Result<(SampleResult, TrajectoryTrace), EngineError> {
     if qubit_count > 20 {
         return Err(EngineError::ExecutionFailed(
             "mid-circuit trajectory sampling requires qubit_count <= 20".into(),
@@ -155,27 +204,41 @@ pub fn sample_mid_circuit_measurements(
     validate_phase_c_sample_circuit(gates, classical_bit_count)?;
 
     let mut counts = std::collections::BTreeMap::new();
+    let mut traces = Vec::with_capacity(shots as usize);
     for shot in 0..shots {
         let shot_seed = seed.wrapping_add(shot);
-        let outcome = simulate_one_shot(gates, qubit_count, classical_bit_count, shot_seed, noise)?;
-        *counts.entry(outcome).or_insert(0) += 1;
+        let trace = simulate_one_shot_with_trace(
+            gates,
+            qubit_count,
+            classical_bit_count,
+            shot,
+            shot_seed,
+            noise,
+        )?;
+        *counts.entry(trace.final_outcome.clone()).or_insert(0) += 1;
+        traces.push(trace);
     }
 
-    Ok(SampleResult { counts, shots })
+    Ok((
+        SampleResult { counts, shots },
+        TrajectoryTrace { shots, traces },
+    ))
 }
 
-fn simulate_one_shot(
+fn simulate_one_shot_with_trace(
     gates: &[Gate],
     qubit_count: usize,
     classical_bit_count: usize,
+    shot_index: u64,
     seed: u64,
     noise: Option<&NoiseModel>,
-) -> Result<String, EngineError> {
+) -> Result<TrajectoryShotTrace, EngineError> {
     let mut state = DenseTnState::try_new(qubit_count)?;
     let mut classical = vec![0u8; classical_bit_count];
     let mut rng = StdRng::seed_from_u64(seed);
+    let mut measures = Vec::new();
 
-    for gate in gates {
+    for (gate_index, gate) in gates.iter().enumerate() {
         match gate {
             Gate::MEASURE(spec) => {
                 let (p0, p1) = z_marginal(&state, spec.qubit);
@@ -189,6 +252,14 @@ fn simulate_one_shot(
                 }
                 collapse_z(&mut state, spec.qubit, outcome);
                 classical[spec.cbit] = outcome;
+                measures.push(TrajectoryMeasureEvent {
+                    gate_index,
+                    qubit: spec.qubit,
+                    cbit: spec.cbit,
+                    p0,
+                    p1,
+                    outcome,
+                });
             }
             Gate::RESET(q) => reset_qubit(&mut state, *q),
             Gate::IF(params) => {
@@ -202,7 +273,13 @@ fn simulate_one_shot(
         }
     }
 
-    Ok(outcome_key_from_classical(&classical))
+    Ok(TrajectoryShotTrace {
+        shot_index,
+        shot_seed: seed,
+        final_outcome: outcome_key_from_classical(&classical),
+        classical_bits: classical,
+        measures,
+    })
 }
 
 fn apply_noisy_unitary(
@@ -307,5 +384,37 @@ mod tests {
         ];
         let err = validate_phase_c_sample_circuit(&gates, 1).unwrap_err().to_string();
         assert!(err.contains("measured qubit"));
+    }
+
+    #[test]
+    fn trajectory_trace_records_measurement_probabilities_and_outcomes() {
+        let gates = vec![
+            Gate::H(0),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::X(1)),
+            }),
+            Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
+        ];
+        let (sample, trace) =
+            sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 4, 7, None).expect("trace");
+        assert_eq!(sample.shots, 4);
+        assert_eq!(trace.shots, 4);
+        assert_eq!(trace.traces.len(), 4);
+        assert_eq!(trace.traces[0].shot_index, 0);
+        assert_eq!(trace.traces[0].shot_seed, 7);
+        assert_eq!(trace.traces[0].measures.len(), 2);
+        let first = &trace.traces[0].measures[0];
+        assert_eq!(first.gate_index, 1);
+        assert_eq!(first.qubit, 0);
+        assert_eq!(first.cbit, 0);
+        assert!((first.p0 - 0.5).abs() < 1e-9, "p0={}", first.p0);
+        assert!((first.p1 - 0.5).abs() < 1e-9, "p1={}", first.p1);
+        assert!(trace
+            .traces
+            .iter()
+            .all(|shot| shot.final_outcome == outcome_key_from_classical(&shot.classical_bits)));
     }
 }

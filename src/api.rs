@@ -19,9 +19,12 @@ use crate::distribution_proof::{
     distribution_stark_status_born_air_zk, distribution_stark_status_born_air_zk_linked,
     distribution_stark_status_bound,
 };
+use crate::trajectory_proof::{
+    build_trajectory_segment, distribution_stark_status_trajectory_bound,
+};
 use crate::mid_circuit::{
-    extract_unitary_gates_for_proof, sample_mid_circuit_measurements, uses_mid_circuit_semantics,
-    validate_phase_c_sample_circuit,
+    extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
+    uses_mid_circuit_semantics, validate_phase_c_sample_circuit,
 };
 use crate::noise::NoiseModel;
 use crate::sample::{
@@ -226,12 +229,12 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         .contract(&mut workspace)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let sample_result = if task.output_mode == OutputMode::SampleCounts {
+    let (sample_result, mid_circuit_trace) = if task.output_mode == OutputMode::SampleCounts {
         let classical_bit_count = task.classical_bit_count.unwrap_or(0);
         let shots = task.shots.unwrap_or(0);
         let seed = task.sample_seed.unwrap_or(0);
-        Some(if uses_mid_circuit_semantics(&task.circuit) {
-            sample_mid_circuit_measurements(
+        if uses_mid_circuit_semantics(&task.circuit) {
+            let (sample, trace) = sample_mid_circuit_measurements_with_trace(
                 &task.circuit,
                 task.qubit_count,
                 classical_bit_count,
@@ -239,21 +242,28 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
                 seed,
                 task.noise_model.as_ref(),
             )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let bound_trace = if task.noise_model.is_none() {
+                Some(trace)
+            } else {
+                None
+            };
+            (Some(sample), bound_trace)
         } else {
             let (_, terminal_measures) = split_unitary_and_measures(&task.circuit)
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-            sample_terminal_measurements(
+            let sample = sample_terminal_measurements(
                 workspace.register_mut(),
                 &terminal_measures,
                 classical_bit_count,
                 shots,
                 seed,
             )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            (Some(sample), None)
+        }
     } else {
-        None
+        (None, None)
     };
 
     let expectation_result = if task.output_mode == OutputMode::Expectation {
@@ -306,6 +316,20 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         None
     };
 
+    let trajectory_segment = if let Some(trace) = mid_circuit_trace.as_ref() {
+        let measures = crate::mid_circuit::collect_measures(&task.circuit);
+        let measurement_spec_hash =
+            crate::distribution_proof::calculate_measurement_spec_hash(&measures);
+        Some(build_trajectory_segment(
+            trace,
+            task.sample_seed.unwrap_or(0),
+            task.shots.unwrap_or(0),
+            measurement_spec_hash,
+        ))
+    } else {
+        None
+    };
+
     let prover = StarkProver;
     let proof = prover
         .generate_proof(
@@ -316,6 +340,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             &output_result_hash,
             &execution_trace,
             distribution_segment.as_ref(),
+            trajectory_segment.as_ref(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let prove_wall_ms = prove_start.elapsed().as_millis() as u64;
@@ -366,7 +391,9 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
-        distribution_proof: Some(if distribution_segment.as_ref().is_some_and(|s| {
+        distribution_proof: Some(if trajectory_segment.is_some() {
+            distribution_stark_status_trajectory_bound()
+        } else if distribution_segment.as_ref().is_some_and(|s| {
             wqc_stark_engine::segment_supports_born_zk(s)
                 && s.born_binding
                     .as_ref()

@@ -2,9 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
-    append_born_stark_tail, append_distribution_tail, generate_born_stark_proof,
-    generate_plonky3_stark_proof, segment_supports_born_zk, verify_stark_proof_core,
-    BornStarkContext, DistributionSegment, StarkContext as EngineContext,
+    append_born_stark_tail, append_distribution_tail, append_trajectory_tail,
+    generate_born_stark_proof, generate_plonky3_stark_proof, segment_supports_born_zk,
+    verify_stark_proof_core, BornStarkContext, DistributionSegment, StarkContext as EngineContext,
+    TrajectorySegment,
 };
 use base64::{engine::general_purpose, Engine as _};
 
@@ -44,6 +45,7 @@ impl StarkProver {
         output_hash: &str,
         execution_trace: &[f64],
         distribution: Option<&DistributionSegment>,
+        trajectory: Option<&TrajectorySegment>,
     ) -> Result<Proof, String> {
         if execution_trace.is_empty() {
             return Err("Cannot generate STARK proof: execution trace stream is empty.".to_string());
@@ -79,6 +81,10 @@ impl StarkProver {
                 let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
                 proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
             }
+        }
+
+        if let Some(segment) = trajectory {
+            proof_bytes = append_trajectory_tail(proof_bytes, segment);
         }
 
         let stark_proof_b64 = general_purpose::STANDARD.encode(&proof_bytes);
@@ -159,7 +165,7 @@ mod integration_tests {
 
         let prover = StarkProver;
         let proof = prover
-            .generate_proof("circuit-h", "task-h", "node-1", "0", &output_hash, &trace, None)
+            .generate_proof("circuit-h", "task-h", "node-1", "0", &output_hash, &trace, None, None)
             .expect("proof");
 
         assert!(prover.verify_proof(&proof));
@@ -182,7 +188,7 @@ mod integration_tests {
 
         let prover = StarkProver;
         let proof = prover
-            .generate_proof("circuit-cnot0", "task-cnot0", "node-1", "0", &output_hash, &trace, None)
+            .generate_proof("circuit-cnot0", "task-cnot0", "node-1", "0", &output_hash, &trace, None, None)
             .expect("proof");
 
         assert!(prover.verify_proof(&proof));
@@ -235,6 +241,7 @@ mod integration_tests {
                 &output_hash,
                 &trace,
                 Some(&distribution),
+                None,
             )
             .expect("proof");
         assert!(prover.verify_proof(&proof));
