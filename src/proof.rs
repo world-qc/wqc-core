@@ -49,12 +49,18 @@ impl StarkProver {
             return Err("Cannot generate STARK proof: execution trace stream is empty.".to_string());
         }
 
+        let sv_digest = distribution
+            .and_then(|seg| seg.born_binding.as_ref())
+            .map(|b| b.terminal_statevector_digest.as_str())
+            .unwrap_or("");
+
         let context = EngineContext {
             circuit_id,
             sub_task_id: task_id,
             node_id,
             slice_id,
             output_hash,
+            terminal_statevector_digest: sv_digest,
         };
 
         let mut proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
@@ -68,6 +74,7 @@ impl StarkProver {
                 let born_ctx = BornStarkContext {
                     sub_task_id: task_id,
                     probability_digest: &segment.probability_digest,
+                    terminal_statevector_digest: sv_digest,
                 };
                 let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
                 proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
@@ -111,6 +118,7 @@ impl StarkProver {
                     node_id: &proof.public_inputs.node_id,
                     slice_id: &proof.public_inputs.slice_id,
                     output_hash: &proof.public_inputs.output_result_hash,
+                    terminal_statevector_digest: "",
                 };
                 verify_stark_proof_core(&context, &proof_bytes)
             }

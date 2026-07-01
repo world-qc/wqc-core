@@ -41,6 +41,14 @@ pub fn distribution_stark_status_born_air() -> DistributionProofStatus {
     }
 }
 
+/// Phase C2b zk linked — Born zk + unitary v2 `terminal_statevector_digest` bridge.
+pub fn distribution_stark_status_born_air_zk_linked() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "born_air_zk_linked_v1",
+    }
+}
+
 /// Phase C2b zk — Born-rule constraints proved in Plonky3 `DistributionAir`.
 pub fn distribution_stark_status_born_air_zk() -> DistributionProofStatus {
     DistributionProofStatus {
