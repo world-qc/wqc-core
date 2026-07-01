@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
     append_born_stark_tail, append_distribution_tail, append_trajectory_stark_tail,
-    append_trajectory_tail, generate_born_stark_proof, generate_plonky3_stark_proof,
-    generate_trajectory_stark_bundle, segment_supports_born_zk, segment_supports_trajectory_zk,
-    verify_stark_proof_core, BornStarkContext, DistributionSegment, StarkContext as EngineContext,
-    TrajectorySegment,
+    append_trajectory_tail, compose_unitary_trajectory_leaf, generate_born_stark_proof,
+    generate_plonky3_stark_proof, generate_trajectory_stark_bundle, segment_supports_born_zk,
+    segment_supports_trajectory_zk, verify_stark_proof_core, BornStarkContext,
+    DistributionSegment, StarkContext as EngineContext, TrajectorySegment,
 };
 use base64::{engine::general_purpose, Engine as _};
 
@@ -93,10 +93,15 @@ impl StarkProver {
         }
 
         if let Some(segment) = trajectory {
-            proof_bytes = append_trajectory_tail(proof_bytes, segment);
-            if segment_supports_trajectory_zk(segment) {
+            if segment_supports_trajectory_zk(segment) && !traj_link.is_empty() {
                 let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
-                proof_bytes = append_trajectory_stark_tail(proof_bytes, &bundle);
+                proof_bytes = compose_unitary_trajectory_leaf(&context, &proof_bytes, segment, &bundle)?;
+            } else {
+                proof_bytes = append_trajectory_tail(proof_bytes, segment);
+                if segment_supports_trajectory_zk(segment) {
+                    let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
+                    proof_bytes = append_trajectory_stark_tail(proof_bytes, &bundle);
+                }
             }
         }
 

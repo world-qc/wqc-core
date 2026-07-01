@@ -21,7 +21,7 @@ use crate::distribution_proof::{
 };
 use crate::trajectory_proof::{
     build_trajectory_segment, distribution_stark_status_trajectory_air_zk,
-    distribution_stark_status_trajectory_air_zk_linked, distribution_stark_status_trajectory_bound,
+    distribution_stark_status_trajectory_air_zk_composed, distribution_stark_status_trajectory_bound,
 };
 use crate::mid_circuit::{
     extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
@@ -397,7 +397,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             wqc_stark_engine::segment_supports_trajectory_zk(s)
                 && !s.unitary_link_digest.is_empty()
         }) {
-            distribution_stark_status_trajectory_air_zk_linked()
+            distribution_stark_status_trajectory_air_zk_composed()
         } else if trajectory_segment
             .as_ref()
             .is_some_and(|s| wqc_stark_engine::segment_supports_trajectory_zk(s))

@@ -27,6 +27,14 @@ pub fn distribution_stark_status_trajectory_air_zk() -> DistributionProofStatus 
     }
 }
 
+/// Phase C2c zk composed — unitary + trajectory children in v3 compose + AggregationAir tail.
+pub fn distribution_stark_status_trajectory_air_zk_composed() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "trajectory_air_zk_composed_v1",
+    }
+}
+
 /// Phase C2c zk linked — trajectory marginal zk + unitary v2 `unitary_link_digest` bridge.
 pub fn distribution_stark_status_trajectory_air_zk_linked() -> DistributionProofStatus {
     DistributionProofStatus {
