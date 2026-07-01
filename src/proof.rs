@@ -282,4 +282,126 @@ mod integration_tests {
         };
         assert!(!prover.verify_proof(&bad));
     }
+
+    #[test]
+    fn mid_circuit_if_compose_proves_and_verifies() {
+        use crate::engine::{Gate, IfParams};
+        use crate::mid_circuit::{
+            extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
+        };
+        use crate::trajectory_proof::build_trajectory_segment;
+        use wqc_stark_engine::is_unitary_trajectory_leaf_compose;
+
+        let gates = vec![
+            Gate::H(0),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::X(1)),
+            }),
+            Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
+        ];
+
+        let (sample, trace) =
+            sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 16, 42, None)
+                .expect("trajectory sample");
+        let output_hash = calculate_sample_result_hash(&sample);
+        let trajectory =
+            build_trajectory_segment(&trace, 2, 42, 16, "spec-hash".into());
+
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let unitary_gates = extract_unitary_gates_for_proof(&gates);
+        let mut unitary_circuit = Circuit::new(2);
+        for gate in unitary_gates {
+            unitary_circuit.add(gate).expect("unitary gate");
+        }
+        let execution_trace = unitary_circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary trace");
+
+        let prover = StarkProver;
+        let proof = prover
+            .generate_proof(
+                "circuit-if",
+                "sub-if-compose",
+                "node-1",
+                "0",
+                &output_hash,
+                &execution_trace,
+                None,
+                Some(&trajectory),
+            )
+            .expect("composed proof");
+
+        assert!(prover.verify_proof(&proof));
+
+        let proof_bytes = general_purpose::STANDARD
+            .decode(&proof.stark_proof_b64)
+            .expect("b64");
+        assert!(is_unitary_trajectory_leaf_compose(&proof_bytes));
+    }
+
+    #[test]
+    fn mid_circuit_compose_rejects_tampered_transcript() {
+        use crate::engine::{Gate, IfParams};
+        use crate::mid_circuit::{
+            extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
+        };
+        use crate::trajectory_proof::build_trajectory_segment;
+
+        let gates = vec![
+            Gate::H(0),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::X(1)),
+            }),
+            Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
+        ];
+
+        let (sample, trace) =
+            sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 8, 7, None).expect("sample");
+        let output_hash = calculate_sample_result_hash(&sample);
+        let trajectory = build_trajectory_segment(&trace, 2, 7, 8, "spec".into());
+
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut unitary_circuit = Circuit::new(2);
+        for gate in extract_unitary_gates_for_proof(&gates) {
+            unitary_circuit.add(gate).expect("gate");
+        }
+        let execution_trace = unitary_circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+
+        let prover = StarkProver;
+        let proof = prover
+            .generate_proof(
+                "circuit-if",
+                "sub-if-tamper",
+                "node-1",
+                "0",
+                &output_hash,
+                &execution_trace,
+                None,
+                Some(&trajectory),
+            )
+            .expect("proof");
+
+        let mut proof_bytes = general_purpose::STANDARD
+            .decode(proof.stark_proof_b64.clone())
+            .expect("b64");
+        let last = proof_bytes.len() - 1;
+        proof_bytes[last] ^= 0xFF;
+        let tampered = Proof {
+            stark_proof_b64: general_purpose::STANDARD.encode(proof_bytes),
+            ..proof.clone()
+        };
+        assert!(!prover.verify_proof(&tampered));
+
+        let mut wrong_meta = proof;
+        wrong_meta.public_inputs.sub_task_id = "wrong-subtask".into();
+        assert!(!prover.verify_proof(&wrong_meta));
+    }
 }
