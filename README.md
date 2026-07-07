@@ -46,6 +46,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `WQC_MPS_MAX_BOND_DIM` | `128` | Node ceiling on MPS bond dimension χ |
 | `WQC_TN_BACKEND` | `cpu` | `webgpu` offloads 1q/merge kernels (needs `--features webgpu`) |
 | `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
+| `WQC_CORE_TCP_PORT` | `3000` | TCP port if connection mode is `tcp` |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
 
@@ -91,7 +92,7 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 
 **X/Y basis (Phase B B2)**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/basis/`.
 
-**`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.  
+**`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.
 **Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice + counts is Phase B (single-slice / small circuits in Phase A).
 
 **Example `sample_counts` circuit** (Bell state):
@@ -189,7 +190,7 @@ Verifies `stark_proof_b64` against the five public inputs. Does not re-run the c
 }
 ```
 
-Success: `200` with `{ "valid": true, "reason": null }`.  
+Success: `200` with `{ "valid": true, "reason": null }`.
 Invalid proof: `403` with `{ "valid": false, "reason": "…" }`.
 
 ### Error handling

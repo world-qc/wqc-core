@@ -80,7 +80,11 @@ async fn main() {
         }
         _ => {
             // Default Fallback: Standard TCP Network Mode
-            let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+            let port = std::env::var("WQC_CORE_TCP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3000);
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
             let url = format!("http://{}", addr);
             print_core_banner(connection_mode.as_str(), &url);
