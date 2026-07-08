@@ -13,6 +13,7 @@ use hyper_util::service::TowerToHyperService;
 
 mod basis;
 mod engine;
+mod memory_budget;
 mod proof;
 mod api;
 mod sample;

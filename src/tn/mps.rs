@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::engine::{EngineError, Gate};
+use crate::memory_budget::max_wqc_memory_bytes_from_total;
 use ndarray::{Array1, Array3, Array4};
 use nalgebra::DMatrix;
 use num_complex::Complex64;
@@ -54,11 +55,12 @@ impl MpsState {
         if !cfg!(test) {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_memory();
-            let available = sys.available_memory();
-            if available > 0 && estimated_bytes > (available as f64 * 0.8) as u64 {
+            let total = sys.total_memory();
+            let budget = max_wqc_memory_bytes_from_total(total);
+            if total > 0 && estimated_bytes > budget {
                 return Err(EngineError::InsufficientMemory {
                     required: estimated_bytes,
-                    available,
+                    available: budget,
                 });
             }
         }

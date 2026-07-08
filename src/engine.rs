@@ -72,7 +72,7 @@ impl fmt::Display for EngineError {
             EngineError::InsufficientMemory { required, available } => {
                 write!(
                     f,
-                    "Insufficient memory: need {} bytes, only {} bytes available (80% safety threshold)",
+                    "Insufficient memory: need {} bytes, only {} bytes allowed by host budget (total RAM minus reserve)",
                     required, available
                 )
             }

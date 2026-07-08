@@ -2,6 +2,7 @@
 //! (`2^N` complex amplitudes). This is the reference TN executor until bond-truncated MPS / GPU paths land.
 
 use crate::engine::{EngineError, Gate};
+use crate::memory_budget::max_wqc_memory_bytes_from_total;
 use ndarray::Array1;
 use num_complex::Complex64;
 use rayon::prelude::*;
@@ -25,16 +26,13 @@ impl DenseTnState {
             let mut sys = System::new_all();
             sys.refresh_memory();
 
-            let available_memory = sys.available_memory();
             let total_memory = sys.total_memory();
-            if available_memory > 0 {
-                let available_threshold = (available_memory as f64 * 0.8) as u64;
-                let total_threshold = (total_memory as f64 * 0.9) as u64;
-
-                if required_memory > available_threshold || required_memory > total_threshold {
+            if total_memory > 0 {
+                let budget = max_wqc_memory_bytes_from_total(total_memory);
+                if required_memory > budget {
                     return Err(EngineError::InsufficientMemory {
                         required: required_memory,
-                        available: available_memory,
+                        available: budget,
                     });
                 }
             }
