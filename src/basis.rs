@@ -40,11 +40,7 @@ pub fn pauli_char_for_basis(basis: MeasurementBasis) -> char {
 }
 
 /// Build terminal `MEASURE` suffix for one qubit in the given basis.
-pub fn terminal_measure_in_basis(
-    basis: MeasurementBasis,
-    qubit: usize,
-    cbit: usize,
-) -> Vec<Gate> {
+pub fn terminal_measure_in_basis(basis: MeasurementBasis, qubit: usize, cbit: usize) -> Vec<Gate> {
     let mut gates = unitary_gates_before_z_measure(basis, qubit);
     gates.push(Gate::MEASURE(MeasureParams { qubit, cbit }));
     gates
@@ -54,7 +50,7 @@ pub fn terminal_measure_in_basis(
 mod tests {
     use super::*;
     use crate::engine::{Circuit, ContractionWorkspace, Gate};
-    use crate::expectation::{ComplexCoeff, ObservableSpec, PauliTerm, compute_expectations};
+    use crate::expectation::{compute_expectations, ComplexCoeff, ObservableSpec, PauliTerm};
     use crate::sample::sample_terminal_measurements;
 
     #[test]
@@ -76,7 +72,7 @@ mod tests {
         )
         .expect("sample");
         assert_eq!(sample.counts.get("0"), Some(&64));
-        assert!(sample.counts.get("1").is_none());
+        assert!(!sample.counts.contains_key("1"));
     }
 
     #[test]

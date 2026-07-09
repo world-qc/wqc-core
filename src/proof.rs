@@ -1,14 +1,14 @@
 //! zk-STARK proof generation and verification (`wqc-stark-engine` Mersenne31 AIR commitment).
 
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
     append_born_stark_tail, append_distribution_tail, append_trajectory_stark_tail,
     append_trajectory_tail, compose_unitary_trajectory_leaf, generate_born_stark_proof,
     generate_plonky3_stark_proof, generate_trajectory_stark_bundle, segment_supports_born_zk,
-    segment_supports_trajectory_zk, verify_stark_proof_core, BornStarkContext,
-    DistributionSegment, StarkContext as EngineContext, TrajectorySegment,
+    segment_supports_trajectory_zk, verify_stark_proof_core, BornStarkContext, DistributionSegment,
+    StarkContext as EngineContext, TrajectorySegment,
 };
-use base64::{engine::general_purpose, Engine as _};
 
 /// Vision: the proof is the anchor of trust in a decentralized computer.
 /// STARK-based PoUW proof token returned to wqc-node / the orchestrator.
@@ -37,6 +37,7 @@ impl StarkProver {
     ///
     /// Binds `circuit_id`, `slice_id`, `task_id`, `node_id`, and the contracted scalar hash
     /// into the outward-facing `PublicInputs` envelope.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_proof(
         &self,
         circuit_id: &str,
@@ -49,7 +50,9 @@ impl StarkProver {
         trajectory: Option<&TrajectorySegment>,
     ) -> Result<Proof, String> {
         if execution_trace.is_empty() {
-            return Err("Cannot generate STARK proof: execution trace stream is empty.".to_string());
+            return Err(
+                "Cannot generate STARK proof: execution trace stream is empty.".to_string(),
+            );
         }
 
         let sv_digest = distribution
@@ -76,7 +79,9 @@ impl StarkProver {
 
         let mut proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
         if proof_bytes.is_empty() {
-            return Err("STARK prover runtime error: generated empty proof transcript.".to_string());
+            return Err(
+                "STARK prover runtime error: generated empty proof transcript.".to_string(),
+            );
         }
 
         if let Some(segment) = distribution {
@@ -95,7 +100,8 @@ impl StarkProver {
         if let Some(segment) = trajectory {
             if segment_supports_trajectory_zk(segment) && !traj_link.is_empty() {
                 let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
-                proof_bytes = compose_unitary_trajectory_leaf(&context, &proof_bytes, segment, &bundle)?;
+                proof_bytes =
+                    compose_unitary_trajectory_leaf(&context, &proof_bytes, segment, &bundle)?;
             } else {
                 proof_bytes = append_trajectory_tail(proof_bytes, segment);
                 if segment_supports_trajectory_zk(segment) {
@@ -162,7 +168,9 @@ mod integration_tests {
         calculate_complex_result_hash, Circuit, ComplexResult, ContractionWorkspace, Gate,
         MeasureParams,
     };
-    use crate::sample::{calculate_sample_result_hash, sample_terminal_measurements, split_unitary_and_measures};
+    use crate::sample::{
+        calculate_sample_result_hash, sample_terminal_measurements, split_unitary_and_measures,
+    };
     use wqc_stark_engine::split_distribution_tail;
 
     #[test]
@@ -183,7 +191,16 @@ mod integration_tests {
 
         let prover = StarkProver;
         let proof = prover
-            .generate_proof("circuit-h", "task-h", "node-1", "0", &output_hash, &trace, None, None)
+            .generate_proof(
+                "circuit-h",
+                "task-h",
+                "node-1",
+                "0",
+                &output_hash,
+                &trace,
+                None,
+                None,
+            )
             .expect("proof");
 
         assert!(prover.verify_proof(&proof));
@@ -206,7 +223,16 @@ mod integration_tests {
 
         let prover = StarkProver;
         let proof = prover
-            .generate_proof("circuit-cnot0", "task-cnot0", "node-1", "0", &output_hash, &trace, None, None)
+            .generate_proof(
+                "circuit-cnot0",
+                "task-cnot0",
+                "node-1",
+                "0",
+                &output_hash,
+                &trace,
+                None,
+                None,
+            )
             .expect("proof");
 
         assert!(prover.verify_proof(&proof));
@@ -236,18 +262,18 @@ mod integration_tests {
 
         let shots = 1024u64;
         let seed = 42u64;
-        let sample = sample_terminal_measurements(
+        let sample =
+            sample_terminal_measurements(workspace.register_mut(), &measures, 2, shots, seed)
+                .expect("sample");
+        let output_hash = calculate_sample_result_hash(&sample);
+        let distribution = build_terminal_distribution_segment(
             workspace.register_mut(),
             &measures,
             2,
             shots,
             seed,
         )
-        .expect("sample");
-        let output_hash = calculate_sample_result_hash(&sample);
-        let distribution =
-            build_terminal_distribution_segment(workspace.register_mut(), &measures, 2, shots, seed)
-                .expect("distribution");
+        .expect("distribution");
 
         let prover = StarkProver;
         let proof = prover
@@ -307,8 +333,7 @@ mod integration_tests {
             sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 16, 42, None)
                 .expect("trajectory sample");
         let output_hash = calculate_sample_result_hash(&sample);
-        let trajectory =
-            build_trajectory_segment(&trace, 2, 42, 16, "spec-hash".into());
+        let trajectory = build_trajectory_segment(&trace, 2, 42, 16, "spec-hash".into());
 
         let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
         let unitary_gates = extract_unitary_gates_for_proof(&gates);

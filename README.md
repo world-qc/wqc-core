@@ -211,11 +211,15 @@ There is no `503` path and no `memory_cost_kb` request field (removed with Argon
 
 ## Requirements
 
-- **Rust**: 1.75+ (workspace uses 2021 edition)
+- **Rust**: 1.95+ (see `AGENTS.md`)
 - **RAM**: Depends on `N` and χ; devnet compose often sets `WQC_MPS_MAX_BOND_DIM=256`
 - **Key deps**: `nalgebra` (SVD), `wqc-stark-engine` (Plonky3), `axum`, `sha3`
 
 One concurrent `/compute` per process is recommended; the node orchestrates single-task execution per core instance.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding guidelines, and the pull request process.
 
 ## License
 

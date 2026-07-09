@@ -1,37 +1,38 @@
 //! HTTP API surface for wqc-core: compute, verify, discovery, and health.
 
-use axum::{Json, http::StatusCode};
-use colored::*;
-use serde::{Deserialize, Serialize};
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
-use wqc_stark_engine::trace_spec::TRACE_WIDTH;
-use crate::engine::{
-    ComplexResult, ContractionWorkspace, SliceAssignment, TensorNetwork,
-    calculate_complex_result_hash,
-};
-use crate::proof::{Proof, StarkProver};
-use crate::expectation::{
-    ExpectationResult, ObservableSpec, calculate_expectation_result_hash, compute_expectations,
-    validate_expectation_task,
-};
 use crate::distribution_proof::{
-    build_terminal_distribution_segment, distribution_stark_status, distribution_stark_status_born_air,
-    distribution_stark_status_born_air_zk, distribution_stark_status_born_air_zk_linked,
-    distribution_stark_status_bound,
+    build_terminal_distribution_segment, distribution_stark_status,
+    distribution_stark_status_born_air, distribution_stark_status_born_air_zk,
+    distribution_stark_status_born_air_zk_linked, distribution_stark_status_bound,
 };
-use crate::trajectory_proof::{
-    build_trajectory_segment, distribution_stark_status_trajectory_air_zk,
-    distribution_stark_status_trajectory_air_zk_composed, distribution_stark_status_trajectory_bound,
+use crate::engine::{
+    calculate_complex_result_hash, ComplexResult, ContractionWorkspace, SliceAssignment,
+    TensorNetwork,
+};
+use crate::expectation::{
+    calculate_expectation_result_hash, compute_expectations, validate_expectation_task,
+    ExpectationResult, ObservableSpec,
 };
 use crate::mid_circuit::{
     extract_unitary_gates_for_proof, sample_mid_circuit_measurements_with_trace,
     uses_mid_circuit_semantics, validate_phase_c_sample_circuit,
 };
 use crate::noise::NoiseModel;
+use crate::proof::{Proof, StarkProver};
 use crate::sample::{
-    OutputMode, SampleResult, calculate_sample_result_hash, sample_terminal_measurements,
-    split_unitary_and_measures,
+    calculate_sample_result_hash, sample_terminal_measurements, split_unitary_and_measures,
+    OutputMode, SampleResult,
 };
+use crate::trajectory_proof::{
+    build_trajectory_segment, distribution_stark_status_trajectory_air_zk,
+    distribution_stark_status_trajectory_air_zk_composed,
+    distribution_stark_status_trajectory_bound,
+};
+use axum::{http::StatusCode, Json};
+use colored::*;
+use serde::{Deserialize, Serialize};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
+use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
 /// Payload received from wqc-node (matches the orchestrator's pruned sub-task shape).
 #[derive(Debug, Deserialize)]
@@ -139,23 +140,30 @@ fn validate_task(
     match task.output_mode {
         OutputMode::StatevectorScalar => {
             if !measures.is_empty() {
-                return Err("circuit contains MEASURE gates but output_mode is not sample_counts".into());
+                return Err(
+                    "circuit contains MEASURE gates but output_mode is not sample_counts".into(),
+                );
             }
             Ok(())
         }
         OutputMode::SampleCounts => validate_sample_task(task, measures),
-        OutputMode::Expectation => validate_expectation_task(task.qubit_count, measures, &task.observables),
+        OutputMode::Expectation => {
+            validate_expectation_task(task.qubit_count, measures, &task.observables)
+        }
     }
 }
 
-fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasureParams]) -> Result<(), String> {
+fn validate_sample_task(
+    task: &ComputeTask,
+    measures: &[crate::engine::MeasureParams],
+) -> Result<(), String> {
     if measures.is_empty() {
         return Err("sample_counts requires at least one MEASURE gate".into());
     }
 
-    let classical_bit_count = task.classical_bit_count.ok_or_else(|| {
-        "classical_bit_count is required for sample_counts".to_string()
-    })?;
+    let classical_bit_count = task
+        .classical_bit_count
+        .ok_or_else(|| "classical_bit_count is required for sample_counts".to_string())?;
     if classical_bit_count == 0 {
         return Err("classical_bit_count must be > 0".into());
     }
@@ -163,7 +171,9 @@ fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasurePa
     validate_phase_c_sample_circuit(&task.circuit, classical_bit_count)
         .map_err(|e| e.to_string())?;
 
-    let shots = task.shots.ok_or_else(|| "shots is required for sample_counts".to_string())?;
+    let shots = task
+        .shots
+        .ok_or_else(|| "shots is required for sample_counts".to_string())?;
     if shots == 0 {
         return Err("shots must be >= 1".into());
     }
@@ -191,7 +201,9 @@ fn validate_sample_task(task: &ComputeTask, measures: &[crate::engine::MeasurePa
 // --- Handlers ---
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
-pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
+pub async fn handle_compute(
+    Json(task): Json<ComputeTask>,
+) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
     println!(
         "{} Processing STARK-monitored task {} (slice {}) on Node {} — effective qubits {} (original {})...",
         "⚙".bright_cyan(),
@@ -208,8 +220,8 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
     let unitary_gates = if uses_mid_circuit_semantics(&task.circuit) {
         extract_unitary_gates_for_proof(&task.circuit)
     } else {
-        let (unitary, _) =
-            split_unitary_and_measures(&task.circuit).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let (unitary, _) = split_unitary_and_measures(&task.circuit)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         unitary
     };
 
@@ -222,8 +234,12 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Step 2: Tensor-network contraction with slice boundary conditions (unitary gates only).
-    let network = TensorNetwork::from_parts(task.qubit_count, unitary_gates.clone(), task.slice_assignments)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let network = TensorNetwork::from_parts(
+        task.qubit_count,
+        unitary_gates.clone(),
+        task.slice_assignments,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let compute_start = std::time::Instant::now();
     let (complex_result, execution_trace) = network
@@ -280,7 +296,10 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
 
     // Step 3: Bind public inputs and emit zk-STARK proof (unitary trace; hash binds to output mode).
     let (result_type, output_result_hash) = if let Some(ref sample) = sample_result {
-        ("sample_counts".to_string(), calculate_sample_result_hash(sample))
+        (
+            "sample_counts".to_string(),
+            calculate_sample_result_hash(sample),
+        )
     } else if let Some(ref expectation) = expectation_result {
         (
             "expectation".to_string(),
@@ -298,7 +317,7 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
         && !uses_mid_circuit_semantics(&task.circuit)
         && task.noise_model.is_none()
     {
-        let classical_bit_count = task.classical_bit_count.unwrap_or(0) as usize;
+        let classical_bit_count = task.classical_bit_count.unwrap_or(0);
         let shots = task.shots.unwrap_or(0);
         let seed = task.sample_seed.unwrap_or(0);
         let (_, terminal_measures) = split_unitary_and_measures(&task.circuit)
@@ -393,55 +412,65 @@ pub async fn handle_compute(Json(task): Json<ComputeTask>) -> Result<Json<Comput
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
         },
-        distribution_proof: Some(if trajectory_segment.as_ref().is_some_and(|s| {
-            wqc_stark_engine::segment_supports_trajectory_zk(s)
-                && !s.unitary_link_digest.is_empty()
-        }) {
-            distribution_stark_status_trajectory_air_zk_composed()
-        } else if trajectory_segment
-            .as_ref()
-            .is_some_and(|s| wqc_stark_engine::segment_supports_trajectory_zk(s))
-        {
-            distribution_stark_status_trajectory_air_zk()
-        } else if trajectory_segment.is_some() {
-            distribution_stark_status_trajectory_bound()
-        } else if distribution_segment.as_ref().is_some_and(|s| {
-            wqc_stark_engine::segment_supports_born_zk(s)
-                && s.born_binding
-                    .as_ref()
-                    .is_some_and(|b| !b.terminal_statevector_digest.is_empty())
-        }) {
-            distribution_stark_status_born_air_zk_linked()
-        } else if distribution_segment
-            .as_ref()
-            .is_some_and(|s| wqc_stark_engine::segment_supports_born_zk(s))
-        {
-            distribution_stark_status_born_air_zk()
-        } else if distribution_segment
-            .as_ref()
-            .is_some_and(|s| s.born_binding.is_some())
-        {
-            distribution_stark_status_born_air()
-        } else if distribution_segment.is_some() {
-            distribution_stark_status_bound()
-        } else {
-            distribution_stark_status()
-        }),
+        distribution_proof: Some(
+            if trajectory_segment.as_ref().is_some_and(|s| {
+                wqc_stark_engine::segment_supports_trajectory_zk(s)
+                    && !s.unitary_link_digest.is_empty()
+            }) {
+                distribution_stark_status_trajectory_air_zk_composed()
+            } else if trajectory_segment
+                .as_ref()
+                .is_some_and(wqc_stark_engine::segment_supports_trajectory_zk)
+            {
+                distribution_stark_status_trajectory_air_zk()
+            } else if trajectory_segment.is_some() {
+                distribution_stark_status_trajectory_bound()
+            } else if distribution_segment.as_ref().is_some_and(|s| {
+                wqc_stark_engine::segment_supports_born_zk(s)
+                    && s.born_binding
+                        .as_ref()
+                        .is_some_and(|b| !b.terminal_statevector_digest.is_empty())
+            }) {
+                distribution_stark_status_born_air_zk_linked()
+            } else if distribution_segment
+                .as_ref()
+                .is_some_and(wqc_stark_engine::segment_supports_born_zk)
+            {
+                distribution_stark_status_born_air_zk()
+            } else if distribution_segment
+                .as_ref()
+                .is_some_and(|s| s.born_binding.is_some())
+            {
+                distribution_stark_status_born_air()
+            } else if distribution_segment.is_some() {
+                distribution_stark_status_bound()
+            } else {
+                distribution_stark_status()
+            },
+        ),
     }))
 }
 
 /// VALIDATOR ROLE: Instantly verifies a zk-STARK proof without re-running contraction.
-pub async fn handle_verify(Json(proof): Json<VerifyProof>) -> Result<Json<VerifyResponse>, (StatusCode, Json<VerifyResponse>)> {
+pub async fn handle_verify(
+    Json(proof): Json<VerifyProof>,
+) -> Result<Json<VerifyResponse>, (StatusCode, Json<VerifyResponse>)> {
     // Stateless verification over the declared public inputs and proof transcript.
     let validator = StarkProver;
     if validator.verify_proof(&proof.proof) {
-        println!("{} zk-STARK proof verified instantly for remote node.", "★".bright_yellow());
+        println!(
+            "{} zk-STARK proof verified instantly for remote node.",
+            "★".bright_yellow()
+        );
         Ok(Json(VerifyResponse {
             valid: true,
             reason: None,
         }))
     } else {
-        println!("{} Fraudulent zk-STARK proof or polynomial mismatch detected!", "✘".red());
+        println!(
+            "{} Fraudulent zk-STARK proof or polynomial mismatch detected!",
+            "✘".red()
+        );
         Err((
             StatusCode::FORBIDDEN,
             Json(VerifyResponse {

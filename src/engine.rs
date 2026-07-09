@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumIter};
 use std::fmt;
+use strum_macros::{Display, EnumIter};
 
 // --- Shared task / result types (serialized by api and wqc-node) ---
 
@@ -69,7 +69,10 @@ impl fmt::Display for EngineError {
             EngineError::QubitIndexOutOfBounds { index, limit } => {
                 write!(f, "Qubit index {} out of bounds (limit: {})", index, limit)
             }
-            EngineError::InsufficientMemory { required, available } => {
+            EngineError::InsufficientMemory {
+                required,
+                available,
+            } => {
                 write!(
                     f,
                     "Insufficient memory: need {} bytes, only {} bytes allowed by host budget (total RAM minus reserve)",
@@ -80,13 +83,21 @@ impl fmt::Display for EngineError {
                 write!(f, "Workspace/circuit qubit count mismatch")
             }
             EngineError::InvalidAssignmentValue { edge_id, value } => {
-                write!(f, "Assignment for edge '{}' has invalid classical value {}", edge_id, value)
+                write!(
+                    f,
+                    "Assignment for edge '{}' has invalid classical value {}",
+                    edge_id, value
+                )
             }
             EngineError::InvalidEdgeId(edge_id) => {
                 write!(f, "Cannot parse tensor edge id '{}'", edge_id)
             }
             EngineError::BasisIndexOutOfBounds { index, dim } => {
-                write!(f, "Contracted basis index {} out of workspace bounds (dim {})", index, dim)
+                write!(
+                    f,
+                    "Contracted basis index {} out of workspace bounds (dim {})",
+                    index, dim
+                )
             }
             EngineError::ExecutionFailed(msg) => write!(f, "{}", msg),
         }
@@ -105,7 +116,10 @@ pub struct ContractionWorkspace {
 }
 
 impl ContractionWorkspace {
-    pub fn try_allocate(qubit_count: usize, original_qubit_count: usize) -> Result<Self, EngineError> {
+    pub fn try_allocate(
+        qubit_count: usize,
+        original_qubit_count: usize,
+    ) -> Result<Self, EngineError> {
         Self::try_allocate_with_bond(qubit_count, original_qubit_count, None)
     }
 
@@ -224,6 +238,7 @@ impl Default for IfParams {
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq, EnumIter, Display)]
 #[serde(tag = "type", content = "params")]
 #[strum(serialize_all = "UPPERCASE")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Gate {
     H(usize),
     X(usize),
@@ -301,33 +316,54 @@ impl Circuit {
             // 1-qubit gates
             Gate::H(t) | Gate::X(t) | Gate::Y(t) | Gate::Z(t) | Gate::T(t) | Gate::S(t) => {
                 if *t >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *t,
+                        limit: self.qubit_count,
+                    });
                 }
             }
             // 1-qubit rotation gates
             Gate::RX(t, _) | Gate::RY(t, _) | Gate::RZ(t, _) => {
                 if *t >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *t,
+                        limit: self.qubit_count,
+                    });
                 }
             }
             // 2-qubit gates
             Gate::CNOT(c, t) | Gate::CZ(c, t) => {
                 if *c >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *c, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *c,
+                        limit: self.qubit_count,
+                    });
                 }
                 if *t >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *t,
+                        limit: self.qubit_count,
+                    });
                 }
             }
             Gate::CCNOT(c1, c2, t) => {
                 if *c1 >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *c1, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *c1,
+                        limit: self.qubit_count,
+                    });
                 }
                 if *c2 >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *c2, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *c2,
+                        limit: self.qubit_count,
+                    });
                 }
                 if *t >= self.qubit_count {
-                    return Err(EngineError::QubitIndexOutOfBounds { index: *t, limit: self.qubit_count });
+                    return Err(EngineError::QubitIndexOutOfBounds {
+                        index: *t,
+                        limit: self.qubit_count,
+                    });
                 }
             }
             Gate::MEASURE(spec) => {
@@ -394,7 +430,11 @@ mod trace_tests {
         let trace = circuit
             .execute_with_trace(workspace.register_mut())
             .expect("trace");
-        assert_eq!(trace.len(), 11, "empty circuit should emit one 11-column boundary row");
+        assert_eq!(
+            trace.len(),
+            11,
+            "empty circuit should emit one 11-column boundary row"
+        );
     }
 
     #[test]
@@ -547,10 +587,7 @@ mod trace_tests {
                 ],
             ),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
-            (
-                "h_ccnot_devnet",
-                vec![Gate::H(0), Gate::CCNOT(0, 1, 2)],
-            ),
+            ("h_ccnot_devnet", vec![Gate::H(0), Gate::CCNOT(0, 1, 2)]),
         ];
 
         for (name, gates) in cases {
@@ -566,13 +603,14 @@ mod trace_tests {
                     | Gate::T(t)
                     | Gate::RX(t, _)
                     | Gate::RY(t, _)
-                    |                     Gate::RZ(t, _) => *t + 1,
+                    | Gate::RZ(t, _) => *t + 1,
                     Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => 1,
                 })
                 .max()
                 .unwrap_or(1);
 
-            let mut workspace = ContractionWorkspace::try_allocate(qubits, qubits).expect("allocate");
+            let mut workspace =
+                ContractionWorkspace::try_allocate(qubits, qubits).expect("allocate");
             let mut circuit = Circuit::new(qubits);
             for gate in gates {
                 circuit.add(gate).expect("add gate");
@@ -601,10 +639,7 @@ mod gate_serde_tests {
     fn measure_gate_deserializes_uppercase_type_tag() {
         let json = r#"{"type":"MEASURE","params":{"qubit":0,"cbit":1}}"#;
         let gate: Gate = serde_json::from_str(json).expect("deserialize MEASURE");
-        assert_eq!(
-            gate,
-            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 1 })
-        );
+        assert_eq!(gate, Gate::MEASURE(MeasureParams { qubit: 0, cbit: 1 }));
     }
 
     #[test]

@@ -164,10 +164,7 @@ fn sample_target_amplitudes(state: &MpsState, phys_target: usize) -> (f64, f64, 
     (a0.re, a0.im, a1.re, a1.im)
 }
 
-fn sample_target_from_dense(
-    state: &Array1<Complex64>,
-    phys_target: usize,
-) -> (f64, f64, f64, f64) {
+fn sample_target_from_dense(state: &Array1<Complex64>, phys_target: usize) -> (f64, f64, f64, f64) {
     let mut max_pair_prob = -1.0;
     let mut best_v0_idx = 0;
     let mut best_v1_idx = 0;
@@ -240,6 +237,7 @@ fn control_probabilities(state: &MpsState, gate: &Gate) -> (f64, f64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_trace_row(
     trace: &mut Vec<f64>,
     gate_id: f64,
@@ -266,7 +264,12 @@ fn push_trace_row(
     trace.push(0.0);
 }
 
-fn push_gate_snapshot_row(state: &MpsState, gate: &Gate, logical_target: usize, trace: &mut Vec<f64>) {
+fn push_gate_snapshot_row(
+    state: &MpsState,
+    gate: &Gate,
+    logical_target: usize,
+    trace: &mut Vec<f64>,
+) {
     let gate_id = gate.to_stark_id().unwrap_or(0.0);
     let (ctrl_prob_1, ctrl_prob_2) = control_probabilities(state, gate);
     let ctrl_active = if ctrl_prob_1 > 0.5 { 1.0 } else { 0.0 };

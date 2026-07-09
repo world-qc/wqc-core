@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use wqc_stark_engine::{
-    calculate_terminal_statevector_digest, calculate_trajectory_digest, canonicalize_terminal_statevector,
-    z_marginal_from_statevector, TrajectoryMarginalWitness, TrajectoryMeasureEvent,
-    TrajectorySegment, TrajectoryShotTrace,
+    calculate_terminal_statevector_digest, calculate_trajectory_digest,
+    canonicalize_terminal_statevector, z_marginal_from_statevector, TrajectoryMarginalWitness,
+    TrajectoryMeasureEvent, TrajectorySegment, TrajectoryShotTrace,
 };
 
 use crate::distribution_proof::DistributionProofStatus;
@@ -54,12 +54,9 @@ fn collect_marginal_witnesses(
         for (measure_index, m) in shot.measures.iter().enumerate() {
             let canonical = canonicalize_terminal_statevector(&m.pre_measure_statevector);
             let digest = calculate_terminal_statevector_digest(&canonical);
-            let (reference_p0, reference_p1) = z_marginal_from_statevector(
-                &canonical,
-                m.qubit,
-                qubit_count as usize,
-            )
-            .unwrap_or((m.p0, m.p1));
+            let (reference_p0, reference_p1) =
+                z_marginal_from_statevector(&canonical, m.qubit, qubit_count as usize)
+                    .unwrap_or((m.p0, m.p1));
             if unitary_link.is_empty() && shot.shot_index == 0 && measure_index == 0 {
                 unitary_link = digest.clone();
             }
@@ -177,10 +174,8 @@ mod tests {
             }),
             Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
         ];
-        let (_, trace) = sample_mid_circuit_measurements_with_trace(
-            &gates, 2, 2, 512, 42, None,
-        )
-        .expect("trace");
+        let (_, trace) =
+            sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 512, 42, None).expect("trace");
         let segment = build_trajectory_segment(&trace, 2, 42, 512, "spec".into());
         assert!(segment_supports_trajectory_zk(&segment));
 

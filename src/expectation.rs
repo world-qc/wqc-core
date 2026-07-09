@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{ComplexResult, EngineError, format_go_complex_result_json, MeasureParams};
+use crate::engine::{format_go_complex_result_json, ComplexResult, EngineError, MeasureParams};
 use crate::tn::MpsState;
 
 /// Complex coefficient for a Pauli term (matches orchestrator JSON).
@@ -60,7 +60,10 @@ pub fn validate_expectation_task(
             return Err(format!("duplicate observable id {:?}", obs.id));
         }
         if obs.terms.is_empty() {
-            return Err(format!("observable {:?} must have at least one term", obs.id));
+            return Err(format!(
+                "observable {:?} must have at least one term",
+                obs.id
+            ));
         }
         for term in &obs.terms {
             validate_pauli_label(&term.label, qubit_count)?;
@@ -80,7 +83,10 @@ fn validate_pauli_label(label: &str, qubit_count: usize) -> Result<(), String> {
     }
     for ch in label.chars() {
         if !matches!(ch, 'I' | 'X' | 'Y' | 'Z') {
-            return Err(format!("invalid pauli character {:?} in label {:?}", ch, label));
+            return Err(format!(
+                "invalid pauli character {:?} in label {:?}",
+                ch, label
+            ));
         }
     }
     Ok(())

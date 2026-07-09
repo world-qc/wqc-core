@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use num_complex::Complex64;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{EngineError, Gate, MeasureParams};
@@ -76,7 +76,9 @@ pub fn format_go_sample_result_json(result: &SampleResult) -> String {
 /// SHA3-256 hex digest of the canonical sample-result JSON.
 pub fn calculate_sample_result_hash(result: &SampleResult) -> String {
     use sha3::{Digest, Sha3_256};
-    hex::encode(Sha3_256::digest(format_go_sample_result_json(result).as_bytes()))
+    hex::encode(Sha3_256::digest(
+        format_go_sample_result_json(result).as_bytes(),
+    ))
 }
 
 /// Build outcome probabilities for terminal Z measurements on the full statevector.
@@ -126,7 +128,11 @@ pub fn compute_outcome_probabilities(
     Ok(probs)
 }
 
-fn outcome_key(basis_index: usize, measures: &[MeasureParams], classical_bit_count: usize) -> String {
+fn outcome_key(
+    basis_index: usize,
+    measures: &[MeasureParams],
+    classical_bit_count: usize,
+) -> String {
     let mut bits = vec![0u8; classical_bit_count];
     for spec in measures {
         let bit = (basis_index >> spec.qubit) & 1;
@@ -189,9 +195,17 @@ pub fn sample_terminal_measurements(
     seed: u64,
 ) -> Result<SampleResult, EngineError> {
     let statevector = state.contract_to_statevector()?;
-    let probabilities =
-        compute_outcome_probabilities(&statevector, state.qubit_count, measures, classical_bit_count)?;
-    Ok(sample_counts_from_probabilities(&probabilities, shots, seed))
+    let probabilities = compute_outcome_probabilities(
+        &statevector,
+        state.qubit_count,
+        measures,
+        classical_bit_count,
+    )?;
+    Ok(sample_counts_from_probabilities(
+        &probabilities,
+        shots,
+        seed,
+    ))
 }
 
 #[cfg(test)]
@@ -227,21 +241,15 @@ mod tests {
             MeasureParams { qubit: 0, cbit: 0 },
             MeasureParams { qubit: 1, cbit: 1 },
         ];
-        let sample = sample_terminal_measurements(
-            workspace.register_mut(),
-            &measures,
-            2,
-            1024,
-            42,
-        )
-        .expect("sample");
+        let sample = sample_terminal_measurements(workspace.register_mut(), &measures, 2, 1024, 42)
+            .expect("sample");
 
         assert_eq!(sample.shots, 1024);
         assert_eq!(sample.counts.values().sum::<u64>(), 1024);
         assert!(sample.counts.contains_key("00"));
         assert!(sample.counts.contains_key("11"));
-        assert!(sample.counts.get("01").is_none());
-        assert!(sample.counts.get("10").is_none());
+        assert!(!sample.counts.contains_key("01"));
+        assert!(!sample.counts.contains_key("10"));
     }
 
     #[test]

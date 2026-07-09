@@ -156,11 +156,13 @@ impl GpuMpsDevice {
 
         let one_qubit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("apply-one-qubit"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("one-qubit-pipeline"),
-                bind_group_layouts: &[&one_qubit_layout],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("one-qubit-pipeline"),
+                    bind_group_layouts: &[&one_qubit_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             module: &module,
             entry_point: Some("apply_one_qubit"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -169,11 +171,13 @@ impl GpuMpsDevice {
 
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("merge-two-site"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("merge-pipeline"),
-                bind_group_layouts: &[&merge_layout],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("merge-pipeline"),
+                    bind_group_layouts: &[&merge_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             module: &module,
             entry_point: Some("merge_two_site"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -470,8 +474,14 @@ mod tests {
         };
 
         let u = [
-            [Complex64::new(1.0 / 2.0f64.sqrt(), 0.0), Complex64::new(1.0 / 2.0f64.sqrt(), 0.0)],
-            [Complex64::new(1.0 / 2.0f64.sqrt(), 0.0), Complex64::new(-1.0 / 2.0f64.sqrt(), 0.0)],
+            [
+                Complex64::new(1.0 / 2.0f64.sqrt(), 0.0),
+                Complex64::new(1.0 / 2.0f64.sqrt(), 0.0),
+            ],
+            [
+                Complex64::new(1.0 / 2.0f64.sqrt(), 0.0),
+                Complex64::new(-1.0 / 2.0f64.sqrt(), 0.0),
+            ],
         ];
 
         let mut cpu_site = Array3::<Complex64>::zeros((1, 2, 1));

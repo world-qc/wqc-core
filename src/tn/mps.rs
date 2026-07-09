@@ -8,18 +8,16 @@ use std::sync::Arc;
 
 use crate::engine::{EngineError, Gate};
 use crate::memory_budget::max_wqc_memory_bytes_from_total;
-use ndarray::{Array1, Array3, Array4};
 use nalgebra::DMatrix;
+use ndarray::{Array1, Array3, Array4};
 use num_complex::Complex64;
 
-use super::gates::{
-    max_bond_dim_from_env, swap_matrix, two_qubit_matrix, unary_matrix, Mat4,
-};
+use super::gates::{max_bond_dim_from_env, swap_matrix, two_qubit_matrix, unary_matrix, Mat4};
 
 #[cfg(feature = "webgpu")]
-use super::gpu::GpuMpsDevice;
-#[cfg(feature = "webgpu")]
 use super::engine_status::shared_gpu_device;
+#[cfg(feature = "webgpu")]
+use super::gpu::GpuMpsDevice;
 
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.
 pub struct MpsState {
@@ -471,14 +469,12 @@ fn truncated_svd_split(
     let cols = mat.ncols();
     let svd = mat.svd(true, true);
     let singular = svd.singular_values;
-    let rank = singular
-        .iter()
-        .filter(|&&s| s > 1e-12)
-        .count()
-        .max(1);
+    let rank = singular.iter().filter(|&&s| s > 1e-12).count().max(1);
     let chi = rank.min(max_bond).min(rows).min(cols);
 
-    let u = svd.u.ok_or_else(|| EngineError::ExecutionFailed("SVD missing U".into()))?;
+    let u = svd
+        .u
+        .ok_or_else(|| EngineError::ExecutionFailed("SVD missing U".into()))?;
     let v_t = svd
         .v_t
         .ok_or_else(|| EngineError::ExecutionFailed("SVD missing V^T".into()))?;

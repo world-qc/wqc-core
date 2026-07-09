@@ -54,9 +54,7 @@ impl DenseTnState {
         match gate {
             Gate::H(t) => {
                 let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
-                self.apply_unary(*t, |v0, v1| {
-                    ((v0 + v1) * inv_sqrt2, (v0 - v1) * inv_sqrt2)
-                });
+                self.apply_unary(*t, |v0, v1| ((v0 + v1) * inv_sqrt2, (v0 - v1) * inv_sqrt2));
             }
             Gate::X(t) => self.apply_unary(*t, |v0, v1| (v1, v0)),
             Gate::Y(t) => {
@@ -87,9 +85,7 @@ impl DenseTnState {
             }
             Gate::RY(t, theta) => {
                 let (sin, cos) = (theta / 2.0).sin_cos();
-                self.apply_unary(*t, |v0, v1| {
-                    (v0 * cos - v1 * sin, v0 * sin + v1 * cos)
-                });
+                self.apply_unary(*t, |v0, v1| (v0 * cos - v1 * sin, v0 * sin + v1 * cos));
             }
             Gate::RZ(t, theta) => {
                 let (sin, cos) = (theta / 2.0).sin_cos();

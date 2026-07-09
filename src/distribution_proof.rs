@@ -80,7 +80,9 @@ pub fn format_go_probability_json(table: &OutcomeProbabilities) -> String {
 /// SHA3-256 hex digest of the canonical probability JSON (`probability_digest`).
 pub fn calculate_probability_digest(table: &OutcomeProbabilities) -> String {
     use sha3::{Digest, Sha3_256};
-    hex::encode(Sha3_256::digest(format_go_probability_json(table).as_bytes()))
+    hex::encode(Sha3_256::digest(
+        format_go_probability_json(table).as_bytes(),
+    ))
 }
 
 /// Canonical measurement-spec JSON — must match orchestrator `FormatMeasurementSpecJSON`.
@@ -145,10 +147,7 @@ pub fn build_terminal_distribution_segment(
         .iter()
         .map(|m| (m.qubit as u32, m.cbit as u32))
         .collect();
-    let terminal_statevector: Vec<(f64, f64)> = statevector
-        .iter()
-        .map(|c| (c.re, c.im))
-        .collect();
+    let terminal_statevector: Vec<(f64, f64)> = statevector.iter().map(|c| (c.re, c.im)).collect();
     let born_binding = BornBinding::from_specs(
         state.qubit_count as u32,
         classical_bit_count as u32,
@@ -182,10 +181,7 @@ mod tests {
     #[test]
     fn probability_json_uses_sorted_keys_and_go_float_style() {
         let table = OutcomeProbabilities {
-            probabilities: BTreeMap::from([
-                ("11".into(), 0.5),
-                ("00".into(), 0.5),
-            ]),
+            probabilities: BTreeMap::from([("11".into(), 0.5), ("00".into(), 0.5)]),
         };
         assert_eq!(
             format_go_probability_json(&table),
@@ -196,10 +192,7 @@ mod tests {
     #[test]
     fn probability_digest_matches_orchestrator_golden_bell() {
         let table = OutcomeProbabilities {
-            probabilities: BTreeMap::from([
-                ("00".into(), 0.5),
-                ("11".into(), 0.5),
-            ]),
+            probabilities: BTreeMap::from([("00".into(), 0.5), ("11".into(), 0.5)]),
         };
         assert_eq!(
             calculate_probability_digest(&table),
@@ -232,7 +225,10 @@ mod tests {
             .execute_with_trace(workspace.register_mut())
             .expect("unitary");
 
-        let statevector = workspace.register_mut().contract_to_statevector().expect("dense");
+        let statevector = workspace
+            .register_mut()
+            .contract_to_statevector()
+            .expect("dense");
         let measures = vec![
             MeasureParams { qubit: 0, cbit: 0 },
             MeasureParams { qubit: 1, cbit: 1 },
@@ -302,14 +298,9 @@ mod tests {
             MeasureParams { qubit: 0, cbit: 0 },
             MeasureParams { qubit: 1, cbit: 1 },
         ];
-        let segment = build_terminal_distribution_segment(
-            workspace.register_mut(),
-            &measures,
-            2,
-            1024,
-            42,
-        )
-        .expect("segment");
+        let segment =
+            build_terminal_distribution_segment(workspace.register_mut(), &measures, 2, 1024, 42)
+                .expect("segment");
         let binding = segment.born_binding.as_ref().expect("born binding");
         assert_eq!(binding.qubit_count, 2);
         assert_eq!(binding.classical_bit_count, 2);
@@ -333,14 +324,9 @@ mod tests {
             MeasureParams { qubit: 0, cbit: 0 },
             MeasureParams { qubit: 1, cbit: 1 },
         ];
-        let segment = build_terminal_distribution_segment(
-            workspace.register_mut(),
-            &measures,
-            2,
-            256,
-            99,
-        )
-        .expect("segment");
+        let segment =
+            build_terminal_distribution_segment(workspace.register_mut(), &measures, 2, 256, 99)
+                .expect("segment");
         assert_eq!(evaluate_born_constraint_sum(&segment), 0);
     }
 }

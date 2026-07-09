@@ -30,14 +30,20 @@ pub fn unary_matrix(gate: &Gate) -> Mat2 {
         ],
         Gate::S(_) => {
             let i = Complex64::i();
-            [[Complex64::ONE, Complex64::new(0.0, 0.0)], [Complex64::new(0.0, 0.0), i]]
+            [
+                [Complex64::ONE, Complex64::new(0.0, 0.0)],
+                [Complex64::new(0.0, 0.0), i],
+            ]
         }
         Gate::T(_) => {
             let factor = Complex64::new(
                 std::f64::consts::FRAC_1_SQRT_2,
                 std::f64::consts::FRAC_1_SQRT_2,
             );
-            [[Complex64::ONE, Complex64::new(0.0, 0.0)], [Complex64::new(0.0, 0.0), factor]]
+            [
+                [Complex64::ONE, Complex64::new(0.0, 0.0)],
+                [Complex64::new(0.0, 0.0), factor],
+            ]
         }
         Gate::RX(_, theta) => {
             let (sin, cos) = (theta / 2.0).sin_cos();

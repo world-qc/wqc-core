@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wqc-core
+        uses: actions/checkout@v4
+        with:
+          path: wqc-core
+
+      - name: Checkout wqc-stark-engine
+        uses: actions/checkout@v4
+        with:
+          repository: world-qc/wqc-stark-engine
+          path: wqc-stark-engine
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wqc-core
+
+      - name: cargo fmt
+        working-directory: wqc-core
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: wqc-core
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo build
+        working-directory: wqc-core
+        run: cargo build --locked --verbose
+
+      - name: cargo test
+        working-directory: wqc-core
+        run: cargo test --locked --verbose

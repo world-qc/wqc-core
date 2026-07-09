@@ -1,28 +1,29 @@
 #![deny(unused_imports)]
+#![allow(dead_code)] // Phase B/C APIs are wired incrementally across modules.
 
+use axum::{routing::post, Json, Router};
 use colored::*;
-use std::net::SocketAddr;
-use std::path::Path;
-use axum::{routing::post, Router, Json};
-use tower_http::cors::CorsLayer;
-use tower::Service;
-use tokio::net::{TcpListener, UnixListener};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use std::net::SocketAddr;
+use std::path::Path;
+use tokio::net::{TcpListener, UnixListener};
+use tower::Service;
+use tower_http::cors::CorsLayer;
 
-mod basis;
-mod engine;
-mod memory_budget;
-mod proof;
 mod api;
-mod sample;
+mod basis;
+mod distribution_proof;
+mod engine;
 mod expectation;
+mod memory_budget;
 mod mid_circuit;
 mod noise;
-mod distribution_proof;
-mod trajectory_proof;
+mod proof;
+mod sample;
 mod tn;
+mod trajectory_proof;
 
 #[tokio::main]
 async fn main() {
@@ -38,7 +39,10 @@ async fn main() {
         .route("/verify", post(api::handle_verify))
         .route("/gates", axum::routing::get(api::get_supported_gates))
         .route("/sysinfo", axum::routing::get(api::get_system_info))
-        .route("/health", axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }))
+        .route(
+            "/health",
+            axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }),
+        )
         .layer(CorsLayer::permissive());
 
     // --- 3. Dynamic Listener Binding based on Configured Mode ---
@@ -98,7 +102,10 @@ async fn main() {
 }
 
 fn print_core_banner(mode: &str, addr: &str) {
-    println!("{}", "============================================================".bright_blue());
+    println!(
+        "{}",
+        "============================================================".bright_blue()
+    );
     print!("{}", "   ▄▄▄▄▄".bright_cyan());
     println!("  {}", "wqc-core ───".bright_white().bold());
     print!("{}", " ▄█  ".bright_cyan());
@@ -106,18 +113,37 @@ fn print_core_banner(mode: &str, addr: &str) {
     print!("{}", "  █▄".bright_cyan());
     println!("  {}", "Plonky3 zk-STARKs Engine (Mersenne31)".dimmed());
     println!("{}", " ▀█▄▄█▄▄█▀".bright_cyan());
-    println!("{}", "============================================================".bright_blue());
+    println!(
+        "{}",
+        "============================================================".bright_blue()
+    );
 
     match mode {
         "uds" => {
-            println!("  {} {:8} {}", "🟢", "STATUS".bold(), "Online & Ready".green());
-            println!("  {} {:8} {}", "⚡", "MODE".bold(), "Unix Domain Socket (High-Performance IPC)".bright_magenta());
-            println!("  {} {:8} {}", "📁", "SOCKET".bold(), addr.underline().bright_cyan());
+            println!("  🟢 {:8} {}", "STATUS".bold(), "Online & Ready".green());
+            println!(
+                "  ⚡ {:8} {}",
+                "MODE".bold(),
+                "Unix Domain Socket (High-Performance IPC)".bright_magenta()
+            );
+            println!(
+                "  📁 {:8} {}",
+                "SOCKET".bold(),
+                addr.underline().bright_cyan()
+            );
         }
         _ => {
-            println!("  {} {:8} {}", "🟢", "STATUS".bold(), "Online & Ready".green());
-            println!("  {} {:8} {}", "🌐", "MODE".bold(), "TCP Network Listener".bright_yellow());
-            println!("  {} {:8} {}", "🔗", "ENDPOINT".bold(), addr.underline().bright_cyan());
+            println!("  🟢 {:8} {}", "STATUS".bold(), "Online & Ready".green());
+            println!(
+                "  🌐 {:8} {}",
+                "MODE".bold(),
+                "TCP Network Listener".bright_yellow()
+            );
+            println!(
+                "  🔗 {:8} {}",
+                "ENDPOINT".bold(),
+                addr.underline().bright_cyan()
+            );
         }
     }
 
@@ -143,7 +169,7 @@ fn print_core_banner(mode: &str, addr: &str) {
         tn.mps_max_bond_dim
     );
     if let Some(note) = &tn.note {
-        println!("  {} {:8} {}", " ", "↳".dimmed(), note.italic().bright_black());
+        println!("    {:8} {}", "↳".dimmed(), note.italic().bright_black());
     }
     println!();
 }

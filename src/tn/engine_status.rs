@@ -52,14 +52,14 @@ fn probe_tn_engine_status() -> TnEngineStatus {
 
     #[cfg(not(feature = "webgpu"))]
     {
-        return TnEngineStatus {
+        TnEngineStatus {
             requested,
             active: "cpu".to_string(),
             note: Some(
                 "WQC_TN_BACKEND=webgpu but wqc-core was built without --features webgpu".into(),
             ),
             mps_max_bond_dim,
-        };
+        }
     }
 
     #[cfg(feature = "webgpu")]

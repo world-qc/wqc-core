@@ -1,17 +1,19 @@
 //! Phase C1: mid-circuit measurement, RESET, and classical IF gates.
 
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{EngineError, Gate, MeasureParams};
 use crate::noise::NoiseModel;
-use crate::sample::{SampleResult, outcome_key_from_classical};
+use crate::sample::{outcome_key_from_classical, SampleResult};
 use crate::tn::dense::DenseTnState;
 
 /// Returns true when the circuit needs trajectory sampling (not terminal-block semantics).
 pub fn uses_mid_circuit_semantics(gates: &[Gate]) -> bool {
-    gates.iter().any(|g| matches!(g, Gate::RESET(_) | Gate::IF(_)))
+    gates
+        .iter()
+        .any(|g| matches!(g, Gate::RESET(_) | Gate::IF(_)))
         || has_unitary_after_first_measure(gates)
 }
 
@@ -19,7 +21,7 @@ fn has_unitary_after_first_measure(gates: &[Gate]) -> bool {
     let Some(idx) = gates.iter().position(|g| matches!(g, Gate::MEASURE(_))) else {
         return false;
     };
-    gates[idx + 1..].iter().any(|g| is_unitary_or_conditional(g))
+    gates[idx + 1..].iter().any(is_unitary_or_conditional)
 }
 
 fn is_unitary_or_conditional(gate: &Gate) -> bool {
@@ -71,9 +73,23 @@ pub struct TrajectoryTrace {
 pub fn extract_unitary_gates_for_proof(gates: &[Gate]) -> Vec<Gate> {
     gates
         .iter()
-        .filter(|g| matches!(g, Gate::H(_) | Gate::X(_) | Gate::Y(_) | Gate::Z(_) | Gate::S(_) | Gate::T(_)
-            | Gate::CNOT(_, _) | Gate::CZ(_, _) | Gate::CCNOT(_, _, _)
-            | Gate::RX(_, _) | Gate::RY(_, _) | Gate::RZ(_, _)))
+        .filter(|g| {
+            matches!(
+                g,
+                Gate::H(_)
+                    | Gate::X(_)
+                    | Gate::Y(_)
+                    | Gate::Z(_)
+                    | Gate::S(_)
+                    | Gate::T(_)
+                    | Gate::CNOT(_, _)
+                    | Gate::CZ(_, _)
+                    | Gate::CCNOT(_, _, _)
+                    | Gate::RX(_, _)
+                    | Gate::RY(_, _)
+                    | Gate::RZ(_, _)
+            )
+        })
         .cloned()
         .collect()
 }
@@ -159,8 +175,16 @@ fn ensure_gate_avoids_measured(
 
 fn gate_qubit_operands(gate: &Gate) -> Vec<usize> {
     match gate {
-        Gate::H(q) | Gate::X(q) | Gate::Y(q) | Gate::Z(q) | Gate::S(q) | Gate::T(q)
-        | Gate::RX(q, _) | Gate::RY(q, _) | Gate::RZ(q, _) | Gate::RESET(q) => vec![*q],
+        Gate::H(q)
+        | Gate::X(q)
+        | Gate::Y(q)
+        | Gate::Z(q)
+        | Gate::S(q)
+        | Gate::T(q)
+        | Gate::RX(q, _)
+        | Gate::RY(q, _)
+        | Gate::RZ(q, _)
+        | Gate::RESET(q) => vec![*q],
         Gate::CNOT(c, t) | Gate::CZ(c, t) => vec![*c, *t],
         Gate::CCNOT(c1, c2, t) => vec![*c1, *c2, *t],
         Gate::MEASURE(spec) => vec![spec.qubit],
@@ -243,11 +267,8 @@ fn simulate_one_shot_with_trace(
     for (gate_index, gate) in gates.iter().enumerate() {
         match gate {
             Gate::MEASURE(spec) => {
-                let pre_measure_statevector: Vec<(f64, f64)> = state
-                    .state
-                    .iter()
-                    .map(|amp| (amp.re, amp.im))
-                    .collect();
+                let pre_measure_statevector: Vec<(f64, f64)> =
+                    state.state.iter().map(|amp| (amp.re, amp.im)).collect();
                 let (p0, p1) = z_marginal(&state, spec.qubit);
                 let mut outcome = if rng.gen::<f64>() < p0 / (p0 + p1).max(1e-30) {
                     0
@@ -306,8 +327,15 @@ fn apply_noisy_unitary(
 
 fn single_qubit_target(gate: &Gate) -> Option<usize> {
     match gate {
-        Gate::H(q) | Gate::X(q) | Gate::Y(q) | Gate::Z(q) | Gate::S(q) | Gate::T(q)
-        | Gate::RX(q, _) | Gate::RY(q, _) | Gate::RZ(q, _) => Some(*q),
+        Gate::H(q)
+        | Gate::X(q)
+        | Gate::Y(q)
+        | Gate::Z(q)
+        | Gate::S(q)
+        | Gate::T(q)
+        | Gate::RX(q, _)
+        | Gate::RY(q, _)
+        | Gate::RZ(q, _) => Some(*q),
         _ => None,
     }
 }
@@ -390,7 +418,9 @@ mod tests {
             Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
             Gate::H(0),
         ];
-        let err = validate_phase_c_sample_circuit(&gates, 1).unwrap_err().to_string();
+        let err = validate_phase_c_sample_circuit(&gates, 1)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("measured qubit"));
     }
 
