@@ -28,6 +28,18 @@ pub struct PublicInputs {
     pub slice_id: String,
     /// SHA3-256 of the JSON-encoded `ComplexResult` (orchestrator consensus key).
     pub output_result_hash: String,
+    /// SHA3-256 hex of canonical measurement spec JSON (C2c STARK PI); empty when unbound.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub measurement_spec_hash: String,
+}
+
+/// Returns `hash` when it is a 64-char ASCII hex digest; otherwise empty (legacy test fixtures).
+fn stark_pi_measurement_spec_hash(hash: &str) -> &str {
+    if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        hash
+    } else {
+        ""
+    }
 }
 
 pub struct StarkProver;
@@ -63,6 +75,12 @@ impl StarkProver {
             .map(|seg| seg.unitary_link_digest.as_str())
             .filter(|digest| !digest.is_empty())
             .unwrap_or("");
+        let measurement_spec_hash = stark_pi_measurement_spec_hash(
+            distribution
+                .map(|seg| seg.measurement_spec_hash.as_str())
+                .or_else(|| trajectory.map(|seg| seg.measurement_spec_hash.as_str()))
+                .unwrap_or(""),
+        );
 
         let context = EngineContext {
             circuit_id,
@@ -75,6 +93,7 @@ impl StarkProver {
             } else {
                 sv_digest
             },
+            measurement_spec_hash,
         };
 
         let mut proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
@@ -131,6 +150,7 @@ impl StarkProver {
                 node_id: node_id.to_string(),
                 slice_id: slice_id.to_string(),
                 output_result_hash: output_hash.to_string(),
+                measurement_spec_hash: measurement_spec_hash.to_string(),
             },
             stark_proof_b64,
         })
@@ -160,6 +180,7 @@ impl StarkProver {
                     slice_id: &proof.public_inputs.slice_id,
                     output_hash: &proof.public_inputs.output_result_hash,
                     terminal_statevector_digest: "",
+                    measurement_spec_hash: &proof.public_inputs.measurement_spec_hash,
                 };
                 verify_stark_proof_core(&context, &proof_bytes)
             }
@@ -301,6 +322,10 @@ mod integration_tests {
             )
             .expect("proof");
         assert!(prover.verify_proof(&proof));
+        assert_eq!(
+            proof.public_inputs.measurement_spec_hash,
+            distribution.measurement_spec_hash
+        );
 
         let proof_bytes = general_purpose::STANDARD
             .decode(proof.stark_proof_b64.as_bytes())
