@@ -23,7 +23,7 @@ pub fn distribution_stark_status_trajectory_bound() -> DistributionProofStatus {
 pub fn distribution_stark_status_trajectory_air_zk() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: true,
-        scheme: "trajectory_air_zk_v1",
+        scheme: "trajectory_air_zk_shot_v1",
     }
 }
 
@@ -31,7 +31,7 @@ pub fn distribution_stark_status_trajectory_air_zk() -> DistributionProofStatus 
 pub fn distribution_stark_status_trajectory_air_zk_composed() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: true,
-        scheme: "trajectory_air_zk_composed_v1",
+        scheme: "trajectory_air_zk_composed_shot_v1",
     }
 }
 
@@ -39,7 +39,7 @@ pub fn distribution_stark_status_trajectory_air_zk_composed() -> DistributionPro
 pub fn distribution_stark_status_trajectory_air_zk_linked() -> DistributionProofStatus {
     DistributionProofStatus {
         bound: true,
-        scheme: "trajectory_air_zk_linked_v1",
+        scheme: "trajectory_air_zk_linked_shot_v1",
     }
 }
 
