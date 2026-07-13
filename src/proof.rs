@@ -4,10 +4,10 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
     append_born_stark_tail, append_distribution_tail, append_trajectory_stark_tail,
-    append_trajectory_tail, compose_unitary_trajectory_leaf, generate_born_stark_proof,
-    generate_plonky3_stark_proof, generate_trajectory_stark_bundle, segment_supports_born_zk,
-    segment_supports_trajectory_zk, verify_stark_proof_core, BornStarkContext, DistributionSegment,
-    StarkContext as EngineContext, TrajectorySegment,
+    append_trajectory_tail, compose_unitary_born_leaf, compose_unitary_trajectory_leaf,
+    generate_born_stark_proof, generate_plonky3_stark_proof, generate_trajectory_stark_bundle,
+    segment_supports_born_zk, segment_supports_trajectory_zk, verify_stark_proof_core,
+    BornStarkContext, DistributionSegment, StarkContext as EngineContext, TrajectorySegment,
 };
 
 /// Vision: the proof is the anchor of trust in a decentralized computer.
@@ -85,15 +85,26 @@ impl StarkProver {
         }
 
         if let Some(segment) = distribution {
-            proof_bytes = append_distribution_tail(proof_bytes, segment);
-            if segment_supports_born_zk(segment) {
+            if segment_supports_born_zk(segment) && !sv_digest.is_empty() {
                 let born_ctx = BornStarkContext {
                     sub_task_id: task_id,
                     probability_digest: &segment.probability_digest,
                     terminal_statevector_digest: sv_digest,
                 };
-                let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
-                proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
+                let born_inner = generate_born_stark_proof(&born_ctx, segment)?;
+                proof_bytes =
+                    compose_unitary_born_leaf(&context, &proof_bytes, segment, &born_inner)?;
+            } else {
+                proof_bytes = append_distribution_tail(proof_bytes, segment);
+                if segment_supports_born_zk(segment) {
+                    let born_ctx = BornStarkContext {
+                        sub_task_id: task_id,
+                        probability_digest: &segment.probability_digest,
+                        terminal_statevector_digest: sv_digest,
+                    };
+                    let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
+                    proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
+                }
             }
         }
 
@@ -171,7 +182,8 @@ mod integration_tests {
     use crate::sample::{
         calculate_sample_result_hash, sample_terminal_measurements, split_unitary_and_measures,
     };
-    use wqc_stark_engine::split_distribution_tail;
+    use base64::engine::general_purpose;
+    use base64::Engine;
 
     #[test]
     fn h_circuit_executor_trace_proves_and_verifies() {
@@ -291,20 +303,16 @@ mod integration_tests {
         assert!(prover.verify_proof(&proof));
 
         let proof_bytes = general_purpose::STANDARD
-            .decode(proof.stark_proof_b64)
+            .decode(proof.stark_proof_b64.as_bytes())
             .expect("b64");
-        let tail = split_distribution_tail(&proof_bytes)
-            .expect("split")
-            .1
-            .expect("tail present");
-        assert!(!tail.0.is_empty());
+        assert!(wqc_stark_engine::is_unitary_born_leaf_compose(&proof_bytes));
 
         let mut tampered = proof_bytes.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 0xFF;
         let bad = Proof {
+            public_inputs: proof.public_inputs.clone(),
             stark_proof_b64: general_purpose::STANDARD.encode(tampered),
-            ..proof
         };
         assert!(!prover.verify_proof(&bad));
     }

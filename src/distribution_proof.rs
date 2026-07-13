@@ -41,6 +41,14 @@ pub fn distribution_stark_status_born_air() -> DistributionProofStatus {
     }
 }
 
+/// Phase C2c zk composed — unitary + Born children in v3 compose + AggregationAir tail.
+pub fn distribution_stark_status_born_air_zk_composed() -> DistributionProofStatus {
+    DistributionProofStatus {
+        bound: true,
+        scheme: "born_air_zk_composed_v1",
+    }
+}
+
 /// Phase C2b zk linked — Born zk + unitary v2 `terminal_statevector_digest` bridge.
 pub fn distribution_stark_status_born_air_zk_linked() -> DistributionProofStatus {
     DistributionProofStatus {

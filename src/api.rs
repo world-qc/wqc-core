@@ -3,7 +3,7 @@
 use crate::distribution_proof::{
     build_terminal_distribution_segment, distribution_stark_status,
     distribution_stark_status_born_air, distribution_stark_status_born_air_zk,
-    distribution_stark_status_born_air_zk_linked, distribution_stark_status_bound,
+    distribution_stark_status_born_air_zk_composed, distribution_stark_status_bound,
 };
 use crate::engine::{
     calculate_complex_result_hash, ComplexResult, ContractionWorkspace, SliceAssignment,
@@ -431,7 +431,7 @@ pub async fn handle_compute(
                         .as_ref()
                         .is_some_and(|b| !b.terminal_statevector_digest.is_empty())
             }) {
-                distribution_stark_status_born_air_zk_linked()
+                distribution_stark_status_born_air_zk_composed()
             } else if distribution_segment
                 .as_ref()
                 .is_some_and(wqc_stark_engine::segment_supports_born_zk)
