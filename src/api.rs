@@ -57,6 +57,9 @@ pub struct ComputeTask {
     /// Orchestrator-recommended MPS bond dimension χ (capped by `WQC_MPS_MAX_BOND_DIM`).
     #[serde(default)]
     pub mps_max_bond_dim: Option<usize>,
+    /// Optional MPS path: `site_order[site] = logical` compact qubit (identity if absent/empty).
+    #[serde(default)]
+    pub mps_site_order: Option<Vec<usize>>,
     /// Result mode (default: contracted scalar amplitude).
     #[serde(default)]
     pub output_mode: OutputMode,
@@ -198,11 +201,28 @@ fn validate_sample_task(
     Ok(())
 }
 
+fn apply_mps_site_order(task: &mut ComputeTask) -> Result<(), crate::engine::EngineError> {
+    let Some(order) = task.mps_site_order.as_ref() else {
+        return Ok(());
+    };
+    if order.is_empty() {
+        return Ok(());
+    }
+    crate::tn::site_order::validate_site_order(order, task.qubit_count)?;
+    let logical_to_site = crate::tn::site_order::logical_to_site_map(order);
+    task.circuit = crate::tn::site_order::remap_gates(&task.circuit, &logical_to_site)?;
+    if !task.observables.is_empty() {
+        task.observables =
+            crate::tn::site_order::remap_observables(&task.observables, &logical_to_site)?;
+    }
+    Ok(())
+}
+
 // --- Handlers ---
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
 pub async fn handle_compute(
-    Json(task): Json<ComputeTask>,
+    Json(mut task): Json<ComputeTask>,
 ) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
     println!(
         "{} Processing STARK-monitored task {} (slice {}) on Node {} — effective qubits {} (original {})...",
@@ -213,6 +233,8 @@ pub async fn handle_compute(
         task.qubit_count,
         task.original_qubit_count,
     );
+
+    apply_mps_site_order(&mut task).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let measures = crate::mid_circuit::collect_measures(&task.circuit);
     validate_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;

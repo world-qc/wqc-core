@@ -66,4 +66,25 @@ mod tests {
         let mut mps = MpsState::try_new_with_bond(2, 4).expect("mps");
         assert!(contract_slice(2, &gates, &[], 2, &mut mps).is_ok());
     }
+
+    #[test]
+    fn reverse_site_order_matches_identity_amplitude() {
+        use crate::tn::site_order::{logical_to_site_map, remap_gates, validate_site_order};
+
+        let gates = vec![Gate::H(0), Gate::CNOT(0, 1)];
+        let chi = exact_bond_dim(2);
+
+        let mut mps_id = MpsState::try_new_with_bond(2, chi).expect("mps");
+        let (r_id, _) = contract_slice(2, &gates, &[], 2, &mut mps_id).expect("id");
+
+        let order = vec![1, 0];
+        validate_site_order(&order, 2).unwrap();
+        let remapped = remap_gates(&gates, &logical_to_site_map(&order)).unwrap();
+        let mut mps_rev = MpsState::try_new_with_bond(2, chi).expect("mps");
+        let (r_rev, _) = contract_slice(2, &remapped, &[], 2, &mut mps_rev).expect("rev");
+
+        // |0…0⟩ is invariant under qubit permutation, so ⟨00|ψ⟩ matches.
+        assert!((r_id.real - r_rev.real).abs() < 1e-8);
+        assert!((r_id.imag - r_rev.imag).abs() < 1e-8);
+    }
 }

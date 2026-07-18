@@ -10,6 +10,7 @@ pub mod dense;
 pub mod engine_status;
 pub mod gates;
 pub mod mps;
+pub mod site_order;
 pub mod trace;
 
 #[cfg(feature = "webgpu")]

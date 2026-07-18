@@ -10,6 +10,7 @@
 | `src/tn/mps.rs` | **Default backend** — MPS with SVD bond truncation (`χ = WQC_MPS_MAX_BOND_DIM`) |
 | `src/tn/gates.rs` | Gate unitary tensors (1- and 2-qubit); CCNOT via Toffoli decomposition |
 | `src/tn/boundary.rs` | Slice leg fixation (`e_<k>`), Policy C validation |
+| `src/tn/site_order.rs` | Optional `mps_site_order` validation + logical→site gate/observable remap |
 | `src/tn/trace.rs` | STARK trace during MPS contraction (dense marginal sampling when `N ≤ 16`) |
 | `src/tn/contract.rs` | `contract_slice()` entry |
 | `src/tn/dense.rs` | Exact `2^N` reference (unit tests only) |
@@ -90,5 +91,5 @@ cargo test -p wqc-core
 - [x] Phase 2b: MPS + bond truncation (default backend)
 - [x] Orchestrator `mps_max_bond_dim` per slice (χ recommendation + bond proxy cap)
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`)
-- [x] Orchestrator TN cut heuristics Phase A/B (`circuit/tn_cut.go` in `wqc-orchestrator`)
-- [ ] TN strict min-cut / contraction order hints (`wqc-core` MPS path order)
+- [x] Orchestrator TN cut: Stoer–Wagner exact min-cut (+ Phase A/B fallback)
+- [x] MPS site-order hints (`mps_site_order` orch → node → `tn/site_order.rs` remap)
