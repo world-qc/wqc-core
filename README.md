@@ -2,6 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-yellow.svg)]()
+[![CI](https://github.com/world-qc/wqc-core/actions/workflows/ci.yml/badge.svg)](https://github.com/world-qc/wqc-core/actions/workflows/ci.yml)
 
 `wqc-core` is the computational heart of the World Quantum Computer (WQC) protocol.
 It is a Rust quantum circuit executor optimized for **Decentralized Proof of Useful Work (D-PoUW)**:
