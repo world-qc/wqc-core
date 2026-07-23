@@ -123,6 +123,19 @@ pub struct VerifyResponse {
     pub reason: Option<String>,
 }
 
+/// Request body for deferred leaf PCS bundle construction.
+#[derive(Debug, Deserialize)]
+pub struct LeafPcsRequest {
+    pub proof: Proof,
+}
+
+/// Encoded leaf PCS bundle returned to wqc-node for orch follow-up delivery.
+#[derive(Debug, Serialize)]
+pub struct LeafPcsResponse {
+    pub leaf_pcs_b64: String,
+    pub bytes: u64,
+}
+
 /// Host resource snapshot for orchestrator / node capacity discovery.
 #[derive(Debug, Serialize)]
 pub struct SystemInfo {
@@ -501,6 +514,48 @@ pub async fn handle_verify(
             }),
         ))
     }
+}
+
+/// Builds a standalone leaf PCS bundle from an already-proven leaf STARK.
+///
+/// Called by wqc-node after result delivery so `/compute` stays within the compute timeout.
+pub async fn handle_leaf_pcs(
+    Json(req): Json<LeafPcsRequest>,
+) -> Result<Json<LeafPcsResponse>, (StatusCode, String)> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let proof_bytes = general_purpose::STANDARD
+        .decode(req.proof.stark_proof_b64.as_bytes())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid stark_proof_b64: {e}"),
+            )
+        })?;
+
+    println!(
+        "{} Building deferred leaf PCS bundle for sub_task {} ({} proof bytes)...",
+        "⚙".bright_cyan(),
+        req.proof.public_inputs.sub_task_id.bright_yellow(),
+        proof_bytes.len(),
+    );
+
+    let started = std::time::Instant::now();
+    let encoded = wqc_stark_engine::build_encoded_leaf_pcs_bundle_from_child(&proof_bytes)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let elapsed_ms = started.elapsed().as_millis();
+
+    println!(
+        "{} Leaf PCS bundle ready ({} bytes, {} ms)",
+        "★".bright_yellow(),
+        encoded.len(),
+        elapsed_ms,
+    );
+
+    Ok(Json(LeafPcsResponse {
+        bytes: encoded.len() as u64,
+        leaf_pcs_b64: general_purpose::STANDARD.encode(&encoded),
+    }))
 }
 
 /// Returns supported gates for orchestrator discovery.

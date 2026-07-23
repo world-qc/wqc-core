@@ -2636,6 +2636,7 @@ dependencies = [
  "p3-util",
  "postcard",
  "rand 0.8.6",
+ "serde",
  "sha3 0.10.9",
 ]
 

@@ -265,6 +265,7 @@ impl GpuMpsDevice {
         });
 
         let pairs = (left * right) as u32;
+        #[allow(clippy::manual_div_ceil)]
         let workgroups = (pairs + 255) / 256;
         let mut encoder = self
             .device
@@ -379,6 +380,7 @@ impl GpuMpsDevice {
         });
 
         let total = theta_len as u32;
+        #[allow(clippy::manual_div_ceil)]
         let workgroups = (total + 255) / 256;
         let mut encoder = self
             .device

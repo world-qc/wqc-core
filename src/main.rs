@@ -37,6 +37,7 @@ async fn main() {
     let app = Router::new()
         .route("/compute", post(api::handle_compute))
         .route("/verify", post(api::handle_verify))
+        .route("/leaf_pcs", post(api::handle_leaf_pcs))
         .route("/gates", axum::routing::get(api::get_supported_gates))
         .route("/sysinfo", axum::routing::get(api::get_system_info))
         .route(
