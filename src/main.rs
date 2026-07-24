@@ -27,6 +27,12 @@ mod trajectory_proof;
 
 #[tokio::main]
 async fn main() {
+    // Cap Plonky3/rayon nested prove parallelism before the global pool is
+    // created. Leaf PCS Keccak paths OOM easily with a wide thread pool.
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        std::env::set_var("RAYON_NUM_THREADS", "1");
+    }
+
     // --- 1. Read Connection Mode from Environment Variable ---
     // Default to "uds" if the variable is not explicitly set.
     let connection_mode = std::env::var("WQC_CONNECTION_MODE")
