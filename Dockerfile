@@ -34,6 +34,9 @@ RUN cp Cargo.lock /Cargo.lock
 
 FROM debian:bookworm-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=builder /usr/local/bin/wqc-core /usr/local/bin/
 COPY --from=builder /Cargo.lock /
