@@ -21,7 +21,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 
 ### Phase 1: Foundation (completed)
 
-- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT, **MEASURE** (terminal Z-basis, Phase A).
+- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT, **MEASURE** (terminal Z-basis).
 - Compute → prove → verify cycle with cross-language hash alignment (Rust / Go).
 - HTTP API over Unix domain socket (default) or TCP.
 
@@ -32,7 +32,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 - [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
 - [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
-- [x] **Phase A execution model (§3.4)**: `sample_counts`, terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
+- [x] **`sample_counts` execution**: terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
 - [x] **Swarm slice delivery (§3.1)**: orchestrator + `wqc-node` responsibility (Policy C split → libp2p dispatch → 1 core = 1 slice). MPI-style in-core state sharding is not a whitepaper goal.
 
 ### Phase 3: Sovereign network (upcoming)
@@ -48,6 +48,10 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `WQC_TN_BACKEND` | `cpu` | `webgpu` offloads 1q/merge kernels (needs `--features webgpu`) |
 | `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
 | `WQC_CORE_TCP_PORT` | `3000` | TCP port if connection mode is `tcp` |
+| `WQC_MAX_MEMORY_GB` | (unset) | PCS memory budget (GiB); unset disables the gate |
+| `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget |
+| `WQC_M4B_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
+| `RAYON_NUM_THREADS` | `1` | Worker threads for prove (lower on memory-constrained hosts) |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
 
@@ -58,6 +62,7 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/compute` | Contract slice + generate STARK proof |
+| `POST` | `/leaf_pcs` | Build leaf PCS bundle from an existing leaf STARK proof |
 | `POST` | `/verify` | Stateless STARK verification |
 | `GET` | `/gates` | Supported gate names (feature discovery) |
 | `GET` | `/sysinfo` | Host RAM / CPU snapshot |
@@ -83,18 +88,18 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 
 `WorkReport` also returns `tn_backend` and `vram_peak_bytes` (WebGPU path).
 
-### `output_mode` (Phase A / B)
+### `output_mode`
 
 | Mode | Returns | STARK proves |
 |------|---------|--------------|
-| `statevector_scalar` | `complex_result` (amplitude at \|0…0⟩) | Unitary TN trace (unchanged) |
+| `statevector_scalar` | `complex_result` (amplitude at \|0…0⟩) | Unitary TN trace |
 | `sample_counts` | `sample_result.counts` + `shots` | Unitary TN trace only; `output_result_hash` binds canonical counts JSON |
 | `expectation` | `expectation_result.values` (Pauli sums) | Unitary TN trace only; `output_result_hash` binds canonical expectation JSON |
 
-**X/Y basis (Phase B B2)**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/circuits/sample/`.
+**X/Y basis**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/circuits/sample/`.
 
 **`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.
-**Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice + counts is Phase B (single-slice / small circuits in Phase A).
+**Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice `sample_counts` is not supported; use single-slice / small circuits.
 
 **Example `sample_counts` circuit** (Bell state):
 
@@ -202,7 +207,7 @@ Invalid proof: `403` with `{ "valid": false, "reason": "…" }`.
 | `403` | Forbidden | `/verify` — STARK transcript or public inputs invalid |
 | `500` | Internal error | Contraction or proving failure |
 
-There is no `503` path and no `memory_cost_kb` request field (removed with Argon2 PoUW).
+There is no `503` path and no `memory_cost_kb` request field.
 
 ## Documentation
 
