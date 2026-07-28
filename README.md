@@ -50,7 +50,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `WQC_CORE_TCP_PORT` | `3000` | TCP port if connection mode is `tcp` |
 | `WQC_MAX_MEMORY_GB` | (unset) | PCS memory budget (GiB); unset disables the gate |
 | `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget |
-| `WQC_M4B_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
+| `WQC_PCS_MMCS_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
 | `RAYON_NUM_THREADS` | `1` | Worker threads for prove (lower on memory-constrained hosts) |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
