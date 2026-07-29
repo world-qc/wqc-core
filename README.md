@@ -49,7 +49,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
 | `WQC_CORE_TCP_PORT` | `3000` | TCP port if connection mode is `tcp` |
 | `WQC_MAX_MEMORY_GB` | (unset) | PCS memory budget (GiB); unset disables the gate |
-| `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget |
+| `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget. Exposed to nodes via `GET /sysinfo` → `pcs_memory_policy` for open-call bid eligibility. |
 | `WQC_PCS_MMCS_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
 | `RAYON_NUM_THREADS` | `1` | Worker threads for prove (lower on memory-constrained hosts) |
 
@@ -65,7 +65,7 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | `POST` | `/leaf_pcs` | Build leaf PCS bundle from an existing leaf STARK proof |
 | `POST` | `/verify` | Stateless STARK verification |
 | `GET` | `/gates` | Supported gate names (feature discovery) |
-| `GET` | `/sysinfo` | Host RAM / CPU snapshot |
+| `GET` | `/sysinfo` | Host RAM / CPU snapshot + TN backend + PCS memory policy |
 
 ### `POST /compute` — request fields
 
@@ -198,6 +198,24 @@ Verifies `stark_proof_b64` against the five public inputs. Does not re-run the c
 
 Success: `200` with `{ "valid": true, "reason": null }`.
 Invalid proof: `403` with `{ "valid": false, "reason": "…" }`.
+
+### `GET /sysinfo`
+
+Returns host metrics and prove-time configuration for node scheduling and PCS open-call gating:
+
+```json
+{
+  "system_memory_used_kb": 1048576,
+  "system_memory_total_kb": 8388608,
+  "cpu_usage_percent": 12.5,
+  "tn_backend_requested": "webgpu",
+  "tn_backend_active": "webgpu",
+  "mps_max_bond_dim": 128,
+  "pcs_memory_policy": "spill"
+}
+```
+
+`pcs_memory_policy` mirrors this core process's `WQC_PCS_MEMORY_POLICY`. `wqc-node` probes it before bidding on PCS open calls.
 
 ### Error handling
 
