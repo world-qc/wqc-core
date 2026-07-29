@@ -32,6 +32,7 @@ use axum::{http::StatusCode, Json};
 use colored::*;
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
+use wqc_stark_engine::plonky3_stark::recursion::PcsMemoryPolicy;
 use wqc_stark_engine::trace_spec::TRACE_WIDTH;
 
 /// Payload received from wqc-node (matches the orchestrator's pruned sub-task shape).
@@ -147,6 +148,8 @@ pub struct SystemInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tn_backend_note: Option<String>,
     pub mps_max_bond_dim: usize,
+    /// Prove-time PCS RAM gate (`WQC_PCS_MEMORY_POLICY` on this core process).
+    pub pcs_memory_policy: String,
 }
 
 fn validate_task(
@@ -585,5 +588,6 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         tn_backend_active: tn.active.clone(),
         tn_backend_note: tn.note.clone(),
         mps_max_bond_dim: tn.mps_max_bond_dim,
+        pcs_memory_policy: PcsMemoryPolicy::from_env().as_str().to_string(),
     })
 }
