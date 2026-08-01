@@ -79,6 +79,9 @@ pub struct ComputeTask {
     /// Optional noise model for trajectory sampling (Phase C3; not STARK-bound).
     #[serde(default)]
     pub noise_model: Option<NoiseModel>,
+    /// Orchestrator security tier (`low|normal|high|ultra`); empty → FRI default (40).
+    #[serde(default)]
+    pub security_level: String,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -400,6 +403,7 @@ pub async fn handle_compute(
             &execution_trace,
             distribution_segment.as_ref(),
             trajectory_segment.as_ref(),
+            &task.security_level,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let prove_wall_ms = prove_start.elapsed().as_millis() as u64;

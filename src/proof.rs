@@ -31,6 +31,9 @@ pub struct PublicInputs {
     /// SHA3-256 hex of canonical measurement spec JSON (C2c STARK PI); empty when unbound.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub measurement_spec_hash: String,
+    /// Orchestrator security tier for FRI query selection; empty → default (40).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub security_level: String,
 }
 
 /// Returns `hash` when it is a 64-char ASCII hex digest; otherwise empty (legacy test fixtures).
@@ -60,6 +63,7 @@ impl StarkProver {
         execution_trace: &[f64],
         distribution: Option<&DistributionSegment>,
         trajectory: Option<&TrajectorySegment>,
+        security_level: &str,
     ) -> Result<Proof, String> {
         if execution_trace.is_empty() {
             return Err(
@@ -94,6 +98,7 @@ impl StarkProver {
                 sv_digest
             },
             measurement_spec_hash,
+            security_level,
         };
 
         let mut proof_bytes = generate_plonky3_stark_proof(&context, execution_trace)?;
@@ -151,6 +156,7 @@ impl StarkProver {
                 slice_id: slice_id.to_string(),
                 output_result_hash: output_hash.to_string(),
                 measurement_spec_hash: measurement_spec_hash.to_string(),
+                security_level: security_level.to_string(),
             },
             stark_proof_b64,
         })
@@ -181,6 +187,7 @@ impl StarkProver {
                     output_hash: &proof.public_inputs.output_result_hash,
                     terminal_statevector_digest: "",
                     measurement_spec_hash: &proof.public_inputs.measurement_spec_hash,
+                    security_level: &proof.public_inputs.security_level,
                 };
                 verify_stark_proof_core(&context, &proof_bytes)
             }
@@ -233,6 +240,7 @@ mod integration_tests {
                 &trace,
                 None,
                 None,
+                "",
             )
             .expect("proof");
 
@@ -265,6 +273,7 @@ mod integration_tests {
                 &trace,
                 None,
                 None,
+                "",
             )
             .expect("proof");
 
@@ -319,6 +328,7 @@ mod integration_tests {
                 &trace,
                 Some(&distribution),
                 None,
+                "",
             )
             .expect("proof");
         assert!(prover.verify_proof(&proof));
@@ -389,6 +399,7 @@ mod integration_tests {
                 &execution_trace,
                 None,
                 Some(&trajectory),
+                "",
             )
             .expect("composed proof");
 
@@ -444,6 +455,7 @@ mod integration_tests {
                 &execution_trace,
                 None,
                 Some(&trajectory),
+                "",
             )
             .expect("proof");
 
