@@ -114,6 +114,7 @@ impl StarkProver {
                     sub_task_id: task_id,
                     probability_digest: &segment.probability_digest,
                     terminal_statevector_digest: sv_digest,
+                    security_level,
                 };
                 let born_inner = generate_born_stark_proof(&born_ctx, segment)?;
                 proof_bytes =
@@ -125,6 +126,7 @@ impl StarkProver {
                         sub_task_id: task_id,
                         probability_digest: &segment.probability_digest,
                         terminal_statevector_digest: sv_digest,
+                        security_level,
                     };
                     let born_proof = generate_born_stark_proof(&born_ctx, segment)?;
                     proof_bytes = append_born_stark_tail(proof_bytes, &born_proof);
@@ -134,13 +136,14 @@ impl StarkProver {
 
         if let Some(segment) = trajectory {
             if segment_supports_trajectory_zk(segment) && !traj_link.is_empty() {
-                let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
+                let bundle = generate_trajectory_stark_bundle(task_id, segment, security_level)?;
                 proof_bytes =
                     compose_unitary_trajectory_leaf(&context, &proof_bytes, segment, &bundle)?;
             } else {
                 proof_bytes = append_trajectory_tail(proof_bytes, segment);
                 if segment_supports_trajectory_zk(segment) {
-                    let bundle = generate_trajectory_stark_bundle(task_id, segment)?;
+                    let bundle =
+                        generate_trajectory_stark_bundle(task_id, segment, security_level)?;
                     proof_bytes = append_trajectory_stark_tail(proof_bytes, &bundle);
                 }
             }

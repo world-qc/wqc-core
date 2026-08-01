@@ -189,7 +189,7 @@ mod tests {
             decode_and_verify_trajectory_tail(&payload, TRAJ_V2_MARKER).expect("decode segment");
         assert_eq!(decoded.trajectory_digest, segment.trajectory_digest);
 
-        let bundle = generate_trajectory_stark_bundle("sub-traj", &segment).expect("zk prove");
+        let bundle = generate_trajectory_stark_bundle("sub-traj", &segment, "").expect("zk prove");
         let mut proof = append_trajectory_tail(Vec::new(), &segment);
         proof = append_trajectory_stark_tail(proof, &bundle);
         let (_, tail) = wqc_stark_engine::split_trajectory_tail(&proof).expect("split");
