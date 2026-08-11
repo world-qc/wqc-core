@@ -227,6 +227,15 @@ Returns host metrics and prove-time configuration for node scheduling and PCS op
 
 There is no `503` path and no `memory_cost_kb` request field.
 
+## Testing
+
+```bash
+cargo test --release                 # CI suite (skips #[ignore])
+cargo test --release -- --ignored  # Plonky3 STARK prove/verify roundtrips (local; can take a long time)
+```
+
+GitHub Actions runs the fast suite only (`timeout-minutes: 45`). Heavy STARK proves are `#[ignore]` — same policy as `wqc-stark-engine`.
+
 ## Documentation
 
 - `doc/tn-engine.md` — MPS backend, χ configuration, execution flow

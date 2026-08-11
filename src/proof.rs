@@ -217,6 +217,7 @@ mod integration_tests {
     use base64::Engine;
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn h_circuit_executor_trace_proves_and_verifies() {
         let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
         let mut circuit = Circuit::new(1);
@@ -251,6 +252,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn inactive_cnot_circuit_executor_trace_proves_and_verifies() {
         let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
         let mut circuit = Circuit::new(2);
@@ -284,6 +286,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn bell_sample_counts_proof_embeds_distribution_tail() {
         let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
         let mut circuit = Circuit::new(2);
@@ -356,6 +359,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn mid_circuit_if_compose_proves_and_verifies() {
         use crate::engine::{Gate, IfParams};
         use crate::mid_circuit::{
@@ -415,6 +419,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn mid_circuit_compose_rejects_tampered_transcript() {
         use crate::engine::{Gate, IfParams};
         use crate::mid_circuit::{

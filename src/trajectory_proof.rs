@@ -163,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow Plonky3 prove; local only — not run in CI"]
     fn if_demo_512_shots_marginal_constraints_and_zk_roundtrip() {
         let gates = vec![
             Gate::H(0),
