@@ -3,12 +3,19 @@
 
 use axum::{routing::post, Json, Router};
 use colored::*;
+#[cfg(unix)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
+#[cfg(unix)]
 use hyper_util::server::conn::auto;
+#[cfg(unix)]
 use hyper_util::service::TowerToHyperService;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::Path;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(unix)]
 use tower::Service;
 use tower_http::cors::CorsLayer;
 
@@ -53,7 +60,16 @@ async fn main() {
         .layer(CorsLayer::permissive());
 
     // --- 3. Dynamic Listener Binding based on Configured Mode ---
+    #[cfg(not(unix))]
+    let connection_mode = if connection_mode == "uds" {
+        eprintln!("WQC_CONNECTION_MODE=uds is not supported on Windows; using tcp");
+        "tcp".to_string()
+    } else {
+        connection_mode
+    };
+
     match connection_mode.as_str() {
+        #[cfg(unix)]
         "uds" => {
             let socket_path = std::env::var("WQC_SOCKET_PATH")
                 .unwrap_or_else(|_| "/var/run/wqc-core.sock".to_string())
