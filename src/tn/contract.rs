@@ -15,7 +15,7 @@ pub fn contract_slice(
     state: &mut MpsState,
 ) -> Result<(ComplexResult, Vec<f64>), EngineError> {
     let boundary = BoundaryConditions::from_assignments(assignments)?;
-    boundary.verify_policy_c(original_qubit_count, qubit_count)?;
+    boundary.verify_compact_register(original_qubit_count, qubit_count)?;
 
     let trace = trace::execute_with_trace(qubit_count, gates, state)?;
     let amp = state.amplitude_at_compact_zero();
@@ -46,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_assignments_validate_policy_c() {
+    fn boundary_assignments_validate_compact_register() {
         let gates = vec![Gate::H(0)];
         let assignments = vec![SliceAssignment {
             edge_id: "e_1".into(),

@@ -12,7 +12,7 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 
 - **Tensor-network execution**: Gate-by-gate MPS contraction with SVD bond truncation (`O(N · χ²)` memory).
 - **zk-STARK D-PoUW**: Plonky3 uni-STARK over the execution trace (`wqc-stark-engine`); no re-execution on verify.
-- **Policy C slices**: Compact register width `qubit_count = N − |assignments|`; scalar output = ⟨0…0|ψ⟩ amplitude.
+- **Compact-register slices**: Width `qubit_count = N − |assignments|`; scalar output = ⟨0…0|ψ⟩ amplitude.
 - **Public-input binding**: `circuit_id`, `sub_task_id`, `node_id`, `slice_id`, `output_result_hash` in every proof.
 - **Orchestrator χ hints**: Per-task `mps_max_bond_dim` capped by node env `WQC_MPS_MAX_BOND_DIM`.
 - **WorkReport metrics**: `trace_rows`, `gate_count`, `compute_wall_ms`, `prove_wall_ms`, `proof_bytes` for Gas settlement upstream.
@@ -28,12 +28,12 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 ### Phase 2: Scaling & distribution (current)
 
 - [x] zk-STARK integration (trace-schema v2, multi-target AIR).
-- [x] TN engine Phase 2a (`src/tn/`, Policy C boundaries).
+- [x] TN engine Phase 2a (`src/tn/`, compact-register boundaries).
 - [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
 - [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
 - [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
 - [x] **`sample_counts` execution**: terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
-- [x] **Swarm slice delivery (§3.1)**: orchestrator + `wqc-node` responsibility (Policy C split → libp2p dispatch → 1 core = 1 slice). MPI-style in-core state sharding is not a whitepaper goal.
+- [x] **Swarm slice delivery (§3.1)**: orchestrator + `wqc-node` responsibility (compact-register split → libp2p dispatch → 1 core = 1 slice). MPI-style in-core state sharding is not a whitepaper goal.
 
 ### Phase 3: Sovereign network (upcoming)
 
@@ -221,7 +221,7 @@ Returns host metrics and prove-time configuration for node scheduling and PCS op
 
 | HTTP | When | Typical cause |
 |------|------|----------------|
-| `400` | Bad request | Invalid qubit index, Policy C mismatch, insufficient RAM for requested χ |
+| `400` | Bad request | Invalid qubit index, compact-register mismatch, insufficient RAM for requested χ |
 | `403` | Forbidden | `/verify` — STARK transcript or public inputs invalid |
 | `500` | Internal error | Contraction or proving failure |
 

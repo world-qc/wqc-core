@@ -9,7 +9,7 @@ This document defines the canonical STARK trace contract between `wqc-core` exec
 - Make failures debuggable by freezing row/column semantics.
 - Support **multi-target gate sequences** (e.g. `H(0)` → `CCNOT(0,1,2)`) via per-gate pre/post rows and transition links.
 
-## Slice contract (Policy C)
+## Compact-register slice contract
 
 Sub-tasks use a **compact register** after tensor slicing:
 

@@ -44,7 +44,7 @@ impl DenseTnState {
         Ok(Self { state, qubit_count })
     }
 
-    /// Amplitude at compact computational basis |0…0⟩ (Policy C scalar readout).
+    /// Amplitude at compact computational basis |0…0⟩ (compact-register scalar readout).
     pub fn amplitude_at_compact_zero(&self) -> Complex64 {
         self.state[0]
     }

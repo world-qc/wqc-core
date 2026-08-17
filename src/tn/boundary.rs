@@ -1,7 +1,7 @@
 //! Slice boundary metadata: classical leg fixation for tensor-network contraction.
 //!
-//! Policy C (current devnet): the orchestrator prunes fixed legs upstream and dispatches a
-//! compact register. Assignments are still validated here and bound into STARK public inputs.
+//! The orchestrator prunes fixed legs upstream and dispatches a compact register.
+//! Assignments are still validated here and bound into STARK public inputs.
 //! The TN executor starts from |0…0⟩ on free wires; `original_qubit_count` records the parent width.
 
 use crate::engine::{EngineError, SliceAssignment};
@@ -29,8 +29,8 @@ impl BoundaryConditions {
         Ok(Self { fixed_qubits })
     }
 
-    /// Policy C consistency: `effective = original - |assignments|`.
-    pub fn verify_policy_c(
+    /// Compact-register consistency: `effective = original - |assignments|`.
+    pub fn verify_compact_register(
         &self,
         original_qubit_count: usize,
         effective_qubit_count: usize,
@@ -45,7 +45,7 @@ impl BoundaryConditions {
 
         if effective_qubit_count != expected_effective {
             return Err(EngineError::ExecutionFailed(format!(
-                "Policy C qubit mismatch: effective={effective_qubit_count}, expected={expected_effective} (original={original_qubit_count}, fixed_legs={})",
+                "compact-register qubit mismatch: effective={effective_qubit_count}, expected={expected_effective} (original={original_qubit_count}, fixed_legs={})",
                 self.fixed_qubits.len()
             )));
         }
@@ -88,7 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_c_verifies_effective_qubit_count() {
+    fn compact_register_verifies_effective_qubit_count() {
         let boundary = BoundaryConditions::from_assignments(&[
             SliceAssignment {
                 edge_id: "e_2".into(),
@@ -101,7 +101,7 @@ mod tests {
         ])
         .expect("parse");
 
-        boundary.verify_policy_c(3, 1).expect("3-2=1");
+        boundary.verify_compact_register(3, 1).expect("3-2=1");
         assert_eq!(boundary.global_basis_index_for_compact_zero(), 0b100);
     }
 
@@ -113,6 +113,6 @@ mod tests {
         }])
         .expect("parse");
 
-        assert!(boundary.verify_policy_c(3, 3).is_err());
+        assert!(boundary.verify_compact_register(3, 3).is_err());
     }
 }

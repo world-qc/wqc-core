@@ -109,7 +109,7 @@ impl fmt::Display for EngineError {
 /// Working memory for MPS tensor contraction (`O(N · χ²)` with bond dimension χ).
 pub struct ContractionWorkspace {
     state: crate::tn::MpsState,
-    /// Global circuit width before slicing; used for Policy C boundary validation.
+    /// Global circuit width before slicing; used for compact-register boundary validation.
     pub original_qubit_count: usize,
     /// Rough byte estimate: `N · χ² · 32`.
     reserved_bytes: u64,

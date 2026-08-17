@@ -9,7 +9,7 @@
 |------|------|
 | `src/tn/mps.rs` | **Default backend** — MPS with SVD bond truncation (`χ = WQC_MPS_MAX_BOND_DIM`) |
 | `src/tn/gates.rs` | Gate unitary tensors (1- and 2-qubit); CCNOT via Toffoli decomposition |
-| `src/tn/boundary.rs` | Slice leg fixation (`e_<k>`), Policy C validation |
+| `src/tn/boundary.rs` | Slice leg fixation (`e_<k>`), compact-register validation |
 | `src/tn/site_order.rs` | Optional `mps_site_order` validation + logical→site gate/observable remap |
 | `src/tn/trace.rs` | STARK trace during MPS contraction (dense marginal sampling when `N ≤ 16`) |
 | `src/tn/contract.rs` | `contract_slice()` entry |
@@ -55,7 +55,7 @@ Shaders: `src/tn/gpu/shaders.wgsl`. Complex numbers use `vec2<f32>` on GPU; resu
 POST /compute
   → ContractionWorkspace::try_allocate_with_bond (χ = min(env, task))
   → TensorNetwork::contract → contract_slice()
-       1. Policy C boundary check
+       1. Compact-register boundary check
        2. |0…0⟩ product MPS
        3. Per gate: pre-trace → apply gate tensor(s) → SVD truncate → post-trace
        4. Scalar = ⟨0…0|ψ⟩
@@ -70,7 +70,7 @@ POST /compute
 | 2-qubit | Bubble SWAPs → adjacent pair → merge → apply `U` → SVD split (truncate to `χ`) |
 | CCNOT | Standard Toffoli decomposition (H / CNOT / T / T†) using 2-site kernels only |
 
-## Policy C boundaries
+## Compact-register boundaries
 
 Unchanged from Phase 2a — see prior sections in git history. `slice_assignments` validate
 `effective_qubit_count == original_qubit_count − |assignments|`.
