@@ -1,0 +1,79 @@
+name: Publish OpenAPI
+
+# This repository is the source of truth for the core engine HTTP API. wqc-docs is public
+# and only carries a rendered snapshot, so every merge that changes the description opens
+# a pull request there rather than editing the published copy by hand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openapi/openapi.yaml'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Sync description to wqc-docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout wqc-core
+        uses: actions/checkout@v4
+        with:
+          path: wqc-core
+
+      # Needs Contents: Write and Pull requests: Write on wqc-docs.
+      - name: Generate token for wqc-docs
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.WQC_APP_ID }}
+          private-key: ${{ secrets.WQC_APP_PRIVATE_KEY }}
+          owner: world-qc
+          repositories: wqc-docs
+
+      - name: Checkout wqc-docs
+        uses: actions/checkout@v4
+        with:
+          repository: world-qc/wqc-docs
+          path: wqc-docs
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Copy description and record provenance
+        working-directory: wqc-docs
+        run: |
+          cp ../wqc-core/openapi/openapi.yaml openapi/core.yaml
+          jq --arg sha "$GITHUB_SHA" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '(.sources[] | select(.name == "core") | .sha) = $sha | .synced_at = $ts' \
+            openapi/sources.json > openapi/sources.json.tmp
+          mv openapi/sources.json.tmp openapi/sources.json
+
+      - name: Open pull request
+        working-directory: wqc-docs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if git diff --quiet -- openapi/core.yaml; then
+            echo "Published description already matches this revision."
+            exit 0
+          fi
+
+          short="${GITHUB_SHA::7}"
+          branch="sync/core-openapi-${short}"
+
+          git config user.name  "wqc-openapi-sync"
+          git config user.email "actions@github.com"
+          git checkout -b "$branch"
+          git add openapi/core.yaml openapi/sources.json
+          git commit -m "docs(openapi): sync core description from ${short}"
+          git push --force-with-lease -u origin "$branch"
+
+          gh pr create \
+            --title "docs(openapi): sync core description from ${short}" \
+            --body "Automated sync from \`world-qc/wqc-core@${GITHUB_SHA}\`.
+
+          The implementation repository remains the source of truth. Review the rendered
+          output on the Pages preview build before merging; merging republishes
+          <https://world-qc.github.io/wqc-docs/core/>." \
+            --head "$branch" \
+            --base main
