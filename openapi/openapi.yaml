@@ -1,0 +1,802 @@
+openapi: 3.0.3
+info:
+  title: WQC Core Compute HTTP API
+  version: 0.1.0
+  description: |
+    Internal HTTP JSON API of the `wqc-core` prover process. This file is the
+    source of truth for request and response shapes.
+
+    **Audience:** `wqc-node` (and local tooling) on the same host. This is not
+    a public API — there is no auth layer and CORS is permissive
+    (`CorsLayer::permissive()`). Do not expose it to a network.
+
+    **Transport:** `WQC_CONNECTION_MODE=uds` (default) listens on
+    `WQC_SOCKET_PATH` (default `/var/run/wqc-core.sock`); `tcp` listens on
+    `0.0.0.0:WQC_CORE_TCP_PORT` (default `3000`). The paths and payloads are
+    identical on both. The `servers` entry below only describes the TCP mode
+    because OpenAPI cannot express a Unix socket.
+
+    **Gate `params` wire form is type-dependent** — see the `Gate` schema.
+    Single-parameter gates take a **bare integer**, not a one-element array.
+    Clients of the orchestrator may write `[0]`; `wqc-node` flattens
+    one-element arrays (`normalize_gate_params`) before calling `/compute`.
+
+    Unknown request fields are ignored, so `wqc-node` may send extra keys
+    (for example `parent_task_id`, `required_votes`).
+
+    Errors are **`text/plain`** bodies, except `POST /verify` which returns a
+    JSON `VerifyResponse` on `403`.
+
+    Protocol meaning (STARK transcript, public inputs, slice contract) lives
+    in [wqc-docs](https://github.com/world-qc/wqc-docs) and
+    [`doc/trace-spec.md`](../doc/trace-spec.md).
+  license:
+    name: GPL-3.0
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://localhost:3000
+    description: "`WQC_CONNECTION_MODE=tcp` (default port 3000)"
+
+tags:
+  - name: Compute
+    description: Slice contraction, proving, and stateless verification
+  - name: Discovery
+    description: Capability and capacity probes used by wqc-node
+
+paths:
+  /compute:
+    post:
+      tags: [Compute]
+      summary: Contract a slice and generate a leaf zk-STARK proof
+      description: |
+        Runs the tensor-network contraction for one compact-register slice,
+        then proves the unitary execution trace. The STARK binds
+        `circuit_id`, `sub_task_id`, `node_id`, `slice_id`, and
+        `output_result_hash`.
+
+        `complex_result` is always present (amplitude at |0…0⟩ on free
+        wires). `sample_result` and `expectation_result` appear only in their
+        respective `output_mode`.
+
+        Effective MPS bond dimension is `min(mps_max_bond_dim, WQC_MPS_MAX_BOND_DIM)`.
+        Memory per slice is roughly `qubit_count · χ² · 32` bytes; allocation
+        failure is a `400`.
+
+        One concurrent `/compute` per process is recommended.
+      operationId: compute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComputeTask"
+            examples:
+              scalar:
+                summary: Scalar amplitude (note bare-integer H params)
+                value:
+                  task_id: sub-task-1
+                  circuit_id: "abc123…"
+                  node_id: "12D3Koo…"
+                  qubit_count: 3
+                  original_qubit_count: 26
+                  slice_id: "0"
+                  slice_assignments: []
+                  mps_max_bond_dim: 128
+                  circuit:
+                    - type: H
+                      params: 0
+                    - type: CCNOT
+                      params: [0, 1, 2]
+              sample_counts:
+                summary: Bell histogram with orchestrator-issued seed
+                value:
+                  task_id: sub-task-1
+                  circuit_id: "abc123…"
+                  node_id: "12D3Koo…"
+                  qubit_count: 2
+                  original_qubit_count: 2
+                  slice_id: ""
+                  slice_assignments: []
+                  output_mode: sample_counts
+                  classical_bit_count: 2
+                  shots: 1024
+                  sample_seed: 42
+                  circuit:
+                    - type: H
+                      params: 0
+                    - type: CNOT
+                      params: [0, 1]
+                    - type: MEASURE
+                      params: { qubit: 0, cbit: 0 }
+                    - type: MEASURE
+                      params: { qubit: 1, cbit: 1 }
+      responses:
+        "200":
+          description: Contraction succeeded and a proof was generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComputeResponse"
+        "400":
+          description: |
+            Invalid request: qubit index out of range, compact-register
+            mismatch, invalid `mps_site_order`, missing `sample_counts`
+            fields, bad observables, or insufficient RAM for the requested χ.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Contraction or proving failure
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /verify:
+    post:
+      tags: [Compute]
+      summary: Stateless zk-STARK verification
+      description: |
+        Verifies `stark_proof_b64` against the declared public inputs without
+        re-running the circuit.
+
+        This is a local convenience path. **Consensus** verification of worker
+        proofs happens in the orchestrator via
+        `libwqc_stark_verifier` (FFI), not here.
+      operationId: verify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyRequest"
+      responses:
+        "200":
+          description: Proof is valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyResponse"
+              example:
+                valid: true
+                reason: null
+        "403":
+          description: Invalid transcript alignment or public inputs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyResponse"
+              example:
+                valid: false
+                reason: Invalid zk-STARK transcript alignment
+        "400":
+          description: Malformed JSON body
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /leaf_pcs:
+    post:
+      tags: [Compute]
+      summary: Build a leaf PCS bundle from an existing leaf STARK proof
+      description: |
+        Deferred so that `/compute` stays inside the node's compute timeout.
+        `wqc-node` calls this after result delivery, either for its own proof
+        or for a CAS-fetched proof in the PCS open-call path.
+
+        Prove-time RAM is gated by `WQC_MAX_MEMORY_GB` and
+        `WQC_PCS_MEMORY_POLICY` (`refuse` fails the build, `spill` lowers the
+        Mmcs chunk). Nodes read that policy from `GET /sysinfo` before
+        bidding on open calls.
+      operationId: buildLeafPcs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeafPcsRequest"
+      responses:
+        "200":
+          description: Encoded leaf PCS bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeafPcsResponse"
+        "400":
+          description: "`stark_proof_b64` is not valid base64"
+          content:
+            text/plain:
+              schema:
+                type: string
+        "422":
+          description: Bundle construction failed (includes memory-policy refusal)
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /gates:
+    get:
+      tags: [Discovery]
+      summary: Supported gate names
+      description: |
+        Names come from the `Gate` enum, uppercased. `wqc-node` maps this list
+        to its `supported_features` bitmask at startup and skips task
+        announcements it cannot execute.
+      operationId: getSupportedGates
+      responses:
+        "200":
+          description: Gate name list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                example:
+                  [
+                    H,
+                    X,
+                    Y,
+                    Z,
+                    T,
+                    S,
+                    CNOT,
+                    CZ,
+                    RX,
+                    RY,
+                    RZ,
+                    CCNOT,
+                    MEASURE,
+                    RESET,
+                    IF,
+                  ]
+
+  /sysinfo:
+    get:
+      tags: [Discovery]
+      summary: Host memory / CPU snapshot and prove-time configuration
+      operationId: getSystemInfo
+      responses:
+        "200":
+          description: Capacity snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemInfo"
+
+  /health:
+    get:
+      tags: [Discovery]
+      summary: Liveness probe
+      description: |
+        Polled by `wqc-node` before every `/compute` and `/leaf_pcs` call.
+        Repeated connection failures open the node-side health gate
+        (`WQC_CORE_HEALTH_FAIL_THRESHOLD`, `WQC_CORE_HEALTH_BACKOFF_SECS`).
+      operationId: getHealth
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [UP]
+
+components:
+  schemas:
+    SliceAssignment:
+      type: object
+      required: [edge_id, value]
+      description: Classical fixation of one contracted tensor leg
+      properties:
+        edge_id:
+          type: string
+          description: "Leg identifier from the orchestrator (`e_0`, `e_1`, …)"
+        value:
+          type: integer
+          enum: [0, 1]
+
+    ComplexResult:
+      type: object
+      required: [real, imag]
+      properties:
+        real:
+          type: number
+        imag:
+          type: number
+
+    OutputMode:
+      type: string
+      enum: [statevector_scalar, sample_counts, expectation]
+      default: statevector_scalar
+
+    MeasureParams:
+      type: object
+      required: [qubit, cbit]
+      description: Z-basis measurement mapping
+      properties:
+        qubit:
+          type: integer
+          minimum: 0
+        cbit:
+          type: integer
+          minimum: 0
+
+    IfParams:
+      type: object
+      required: [cbit, value, gate]
+      description: Apply `gate` when `classical[cbit] == value`
+      properties:
+        cbit:
+          type: integer
+          minimum: 0
+        value:
+          type: integer
+          enum: [0, 1]
+        gate:
+          $ref: "#/components/schemas/Gate"
+
+    SingleParamGate:
+      type: object
+      required: [type, params]
+      description: |
+        `params` is a **bare integer** qubit index. A one-element array is
+        rejected; `wqc-node` flattens `[q]` to `q` before dispatch.
+      properties:
+        type:
+          type: string
+          enum: [H, X, Y, Z, T, S, RESET]
+        params:
+          type: integer
+          minimum: 0
+
+    TwoQubitGate:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [CNOT, CZ]
+        params:
+          type: array
+          minItems: 2
+          maxItems: 2
+          description: "`[control, target]`"
+          items:
+            type: integer
+            minimum: 0
+
+    ToffoliGate:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [CCNOT]
+        params:
+          type: array
+          minItems: 3
+          maxItems: 3
+          description: "`[control_1, control_2, target]`"
+          items:
+            type: integer
+            minimum: 0
+
+    RotationGate:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [RX, RY, RZ]
+        params:
+          type: array
+          minItems: 2
+          maxItems: 2
+          description: "`[qubit, theta_radians]` — first element is an integer index"
+          items:
+            type: number
+
+    MeasureGate:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [MEASURE]
+        params:
+          $ref: "#/components/schemas/MeasureParams"
+
+    IfGate:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [IF]
+        params:
+          $ref: "#/components/schemas/IfParams"
+
+    Gate:
+      description: |
+        Adjacently tagged union: `type` selects the variant and `params`
+        carries its payload. The payload shape differs per gate, so validate
+        against the matching branch.
+      oneOf:
+        - $ref: "#/components/schemas/SingleParamGate"
+        - $ref: "#/components/schemas/TwoQubitGate"
+        - $ref: "#/components/schemas/ToffoliGate"
+        - $ref: "#/components/schemas/RotationGate"
+        - $ref: "#/components/schemas/MeasureGate"
+        - $ref: "#/components/schemas/IfGate"
+
+    NoiseModel:
+      type: object
+      description: |
+        Optional trajectory-sampling noise (mid-circuit `sample_counts`
+        only). **Not STARK-bound** — a noisy run downgrades
+        `distribution_proof` to unbound.
+      properties:
+        depolarizing_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+          description: Single-qubit depolarizing probability after each 1-qubit gate
+        readout_error:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+          description: Classical bit-flip probability after each MEASURE
+
+    ComplexCoeff:
+      type: object
+      required: [real, imag]
+      properties:
+        real:
+          type: number
+        imag:
+          type: number
+
+    PauliTerm:
+      type: object
+      required: [label, coeff]
+      properties:
+        label:
+          type: string
+          description: Length must equal `qubit_count`; alphabet I, X, Y, Z
+        coeff:
+          $ref: "#/components/schemas/ComplexCoeff"
+
+    ObservableSpec:
+      type: object
+      required: [id, terms]
+      description: "Named Pauli sum `O = Σ coeff · P`"
+      properties:
+        id:
+          type: string
+        terms:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PauliTerm"
+
+    ComputeTask:
+      type: object
+      required:
+        - task_id
+        - circuit_id
+        - qubit_count
+        - original_qubit_count
+        - slice_id
+        - slice_assignments
+        - circuit
+      properties:
+        task_id:
+          type: string
+          description: Sub-task id; becomes STARK `sub_task_id`
+        circuit_id:
+          type: string
+          description: SHA3-256 of the pruned circuit JSON (public input)
+        node_id:
+          type: string
+          description: Executing node identity, injected by wqc-node
+        qubit_count:
+          type: integer
+          minimum: 1
+          description: Compact register width after slice cuts
+        original_qubit_count:
+          type: integer
+          minimum: 1
+          description: Parent circuit width before slicing
+        slice_id:
+          type: string
+          description: Binary path in the slice tree (`"0"`, `"01"`)
+        slice_assignments:
+          type: array
+          description: Fixed legs for this slice
+          items:
+            $ref: "#/components/schemas/SliceAssignment"
+        circuit:
+          type: array
+          description: Pruned gates using local (compact) qubit indices
+          items:
+            $ref: "#/components/schemas/Gate"
+        mps_max_bond_dim:
+          type: integer
+          nullable: true
+          description: Orchestrator χ recommendation; capped by `WQC_MPS_MAX_BOND_DIM`
+        mps_site_order:
+          type: array
+          nullable: true
+          description: "`site_order[site] = logical` qubit; empty or absent means identity"
+          items:
+            type: integer
+            minimum: 0
+        output_mode:
+          $ref: "#/components/schemas/OutputMode"
+        classical_bit_count:
+          type: integer
+          nullable: true
+          description: Required and must be > 0 for `sample_counts`
+        shots:
+          type: integer
+          format: int64
+          nullable: true
+          description: Required and must be >= 1 for `sample_counts`
+        sample_seed:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Required for `sample_counts`. Issued by the orchestrator so every
+            worker reproduces the same histogram.
+        observables:
+          type: array
+          description: Required for `expectation`
+          items:
+            $ref: "#/components/schemas/ObservableSpec"
+        noise_model:
+          $ref: "#/components/schemas/NoiseModel"
+        security_level:
+          type: string
+          description: |
+            Orchestrator tier (`low`, `normal`, `high`, `ultra`) selecting FRI
+            query count. Empty or absent uses the engine default (40).
+
+    SampleResult:
+      type: object
+      required: [counts, shots]
+      properties:
+        counts:
+          type: object
+          description: |
+            Bitstring histogram. Keys use **Qiskit order** — rightmost
+            character is `cbit 0`.
+          additionalProperties:
+            type: integer
+            format: int64
+        shots:
+          type: integer
+          format: int64
+
+    ExpectationResult:
+      type: object
+      required: [values]
+      properties:
+        values:
+          type: object
+          description: Expectation value per observable `id`
+          additionalProperties:
+            $ref: "#/components/schemas/ComplexResult"
+
+    PublicInputs:
+      type: object
+      required:
+        - circuit_id
+        - sub_task_id
+        - node_id
+        - slice_id
+        - output_result_hash
+      description: Values the proof transcript is cryptographically bound to
+      properties:
+        circuit_id:
+          type: string
+        sub_task_id:
+          type: string
+        node_id:
+          type: string
+        slice_id:
+          type: string
+        output_result_hash:
+          type: string
+          description: |
+            SHA3-256 of the canonical result JSON for the active
+            `output_mode` (scalar amplitude, counts, or expectation).
+        measurement_spec_hash:
+          type: string
+          description: Canonical measurement-spec digest; omitted when unbound
+        security_level:
+          type: string
+          description: Omitted when the engine default applies
+
+    Proof:
+      type: object
+      required: [public_inputs, stark_proof_b64]
+      properties:
+        public_inputs:
+          $ref: "#/components/schemas/PublicInputs"
+        stark_proof_b64:
+          type: string
+          description: Base64 STARK transcript
+
+    WorkReport:
+      type: object
+      required:
+        - trace_rows
+        - gate_count
+        - compute_wall_ms
+        - prove_wall_ms
+        - proof_bytes
+      description: Auditable metrics forwarded to the orchestrator for gas settlement
+      properties:
+        trace_rows:
+          type: integer
+          format: int64
+        gate_count:
+          type: integer
+          description: Unitary gates proved (measurement gates excluded)
+        compute_wall_ms:
+          type: integer
+          format: int64
+        prove_wall_ms:
+          type: integer
+          format: int64
+        proof_bytes:
+          type: integer
+          format: int64
+          description: Length of `stark_proof_b64`
+        tn_backend:
+          type: string
+          description: Backend actually used (`cpu` or `webgpu`)
+        vram_peak_bytes:
+          type: integer
+          format: int64
+          description: Peak VRAM on the WebGPU path; 0 otherwise
+
+    DistributionProofStatus:
+      type: object
+      required: [bound, scheme]
+      description: |
+        Whether the transcript binds the sampled distribution beyond the
+        unitary trace. `unitary_trace_only` means quorum still relies on the
+        canonical counts hash under a fixed seed.
+
+        The `*_linked_*` schemes are **not** emitted here — the orchestrator
+        derives those itself after checking the digest bridge.
+      properties:
+        bound:
+          type: boolean
+        scheme:
+          type: string
+          enum:
+            - unitary_trace_only
+            - born_deterministic_v1
+            - born_air_v1
+            - born_air_zk_v1
+            - born_air_zk_composed_v1
+            - trajectory_bound_v1
+            - trajectory_air_zk_shot_v1
+            - trajectory_air_zk_composed_shot_v1
+
+    ComputeResponse:
+      type: object
+      required:
+        - task_id
+        - status
+        - result_type
+        - complex_result
+        - proof
+        - work_report
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [success]
+        result_type:
+          $ref: "#/components/schemas/OutputMode"
+        complex_result:
+          $ref: "#/components/schemas/ComplexResult"
+        sample_result:
+          $ref: "#/components/schemas/SampleResult"
+        expectation_result:
+          $ref: "#/components/schemas/ExpectationResult"
+        proof:
+          $ref: "#/components/schemas/Proof"
+        work_report:
+          $ref: "#/components/schemas/WorkReport"
+        distribution_proof:
+          $ref: "#/components/schemas/DistributionProofStatus"
+
+    VerifyRequest:
+      type: object
+      required: [proof]
+      properties:
+        proof:
+          $ref: "#/components/schemas/Proof"
+
+    VerifyResponse:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+
+    LeafPcsRequest:
+      type: object
+      required: [proof]
+      properties:
+        proof:
+          $ref: "#/components/schemas/Proof"
+
+    LeafPcsResponse:
+      type: object
+      required: [leaf_pcs_b64, bytes]
+      properties:
+        leaf_pcs_b64:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+          description: Decoded bundle size
+
+    SystemInfo:
+      type: object
+      required:
+        - system_memory_used_kb
+        - system_memory_total_kb
+        - cpu_usage_percent
+        - tn_backend_requested
+        - tn_backend_active
+        - mps_max_bond_dim
+        - pcs_memory_policy
+      properties:
+        system_memory_used_kb:
+          type: integer
+          format: int64
+        system_memory_total_kb:
+          type: integer
+          format: int64
+        cpu_usage_percent:
+          type: number
+          format: float
+        tn_backend_requested:
+          type: string
+          description: From `WQC_TN_BACKEND`
+        tn_backend_active:
+          type: string
+          description: May differ from requested when a fallback occurred
+        tn_backend_note:
+          type: string
+          description: Present only when requested and active differ
+        mps_max_bond_dim:
+          type: integer
+          description: This process's χ ceiling
+        pcs_memory_policy:
+          type: string
+          enum: [refuse, spill]
+          description: |
+            From `WQC_PCS_MEMORY_POLICY`. `wqc-node` requires `spill` to bid
+            on PCS open calls.

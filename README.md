@@ -57,7 +57,8 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 
 ## API Reference
 
-### Endpoints
+[`openapi/openapi.yaml`](openapi/openapi.yaml) is the source of truth for request and
+response JSON. The table below is an index only.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -66,29 +67,23 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 | `POST` | `/verify` | Stateless STARK verification |
 | `GET` | `/gates` | Supported gate names (feature discovery) |
 | `GET` | `/sysinfo` | Host RAM / CPU snapshot + TN backend + PCS memory policy |
+| `GET` | `/health` | Liveness probe polled by `wqc-node` |
 
-### `POST /compute` — request fields
+There is no auth layer and CORS is permissive. This API is for `wqc-node` on the same
+host; do not expose it to a network.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `task_id` | `string` | Sub-task ID (STARK `sub_task_id`) |
-| `circuit_id` | `string` | SHA3-256 of pruned circuit (public input) |
-| `node_id` | `string` | Executing node identity |
-| `qubit_count` | `int` | Effective compact width after slice cuts |
-| `original_qubit_count` | `int` | Parent circuit width before slicing |
-| `slice_id` | `string` | Binary path in slice tree (e.g. `"0"`, `"01"`) |
-| `slice_assignments` | `array` | Fixed legs `{ "edge_id": "e_0", "value": 0\|1 }` |
-| `circuit` | `array` | Pruned gates with local qubit indices |
-| `mps_max_bond_dim` | `int` (optional) | Orchestrator χ recommendation; effective χ = `min(this, WQC_MPS_MAX_BOND_DIM)` |
-| `output_mode` | `string` (optional) | `statevector_scalar` (default), `sample_counts`, or `expectation` |
-| `classical_bit_count` | `int` (optional) | Classical register width (`sample_counts` required) |
-| `shots` | `int` (optional) | Shot count (`sample_counts` required) |
-| `sample_seed` | `int` (optional) | PRNG seed from orchestrator (`sample_counts` required) |
-| `observables` | `array` (optional) | Pauli sums for `expectation` mode |
+## Semantics that JSON Schema does not capture
 
-`WorkReport` also returns `tn_backend` and `vram_peak_bytes` (WebGPU path).
+**Gate `params` shape**: single-parameter gates (`H`, `X`, `Y`, `Z`, `T`, `S`, `RESET`)
+take a **bare integer**, not a one-element array — `{"type": "H", "params": [0]}` is a
+`400`. Circuits submitted to the orchestrator may use `[0]`; `wqc-node` flattens
+one-element arrays (`normalize_gate_params`), including inside `IF.params.gate`, before
+calling `/compute`.
 
-### `output_mode`
+**Unknown fields are ignored**, so `wqc-node` may send extra keys such as
+`parent_task_id` or `required_votes`.
+
+**`output_mode`**
 
 | Mode | Returns | STARK proves |
 |------|---------|--------------|
@@ -99,133 +94,30 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 **X/Y basis**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/circuits/sample/`.
 
 **`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.
-**Scope**: terminal `MEASURE` gates only; mid-circuit measure is rejected. Sampling uses full statevector projection (`qubit_count ≤ 20`). Multi-slice `sample_counts` is not supported; use single-slice / small circuits.
 
-**Example `sample_counts` circuit** (Bell state):
+**Sampling scope**: terminal `MEASURE` runs via full statevector projection, so it is
+bounded in practice by `qubit_count`. Mid-circuit semantics (`RESET`, `IF`, or a unitary
+after the first `MEASURE`) switch to trajectory sampling and require
+`qubit_count ≤ 20`. Multi-slice `sample_counts` is not supported; use single-slice or
+small circuits.
 
-```json
-{
-  "output_mode": "sample_counts",
-  "classical_bit_count": 2,
-  "shots": 1024,
-  "sample_seed": 42,
-  "circuit": [
-    { "type": "H", "params": [0] },
-    { "type": "CNOT", "params": [0, 1] },
-    { "type": "MEASURE", "params": { "qubit": 0, "cbit": 0 } },
-    { "type": "MEASURE", "params": { "qubit": 1, "cbit": 1 } }
-  ]
-}
-```
+**`distribution_proof`** reports how strongly the transcript binds the sampled
+distribution. `unitary_trace_only` means quorum still relies on the canonical counts
+hash under a fixed seed. The `*_linked_*` schemes are derived by the orchestrator, not
+returned here.
 
-**Example response (`sample_counts`)**:
+**`complex_result`** is always present, even in `sample_counts` and `expectation`
+modes: it is the amplitude at computational basis |0…0⟩ on free wires after TN
+contraction.
 
-```json
-{
-  "task_id": "sub-task-1",
-  "status": "success",
-  "result_type": "sample_counts",
-  "complex_result": { "real": 0.7071067811865475, "imag": 0.0 },
-  "sample_result": {
-    "counts": { "00": 512, "11": 512 },
-    "shots": 1024
-  },
-  "proof": { "…": "…" },
-  "work_report": { "…": "…" }
-}
-```
+**`/verify` is a local convenience path.** Consensus verification of worker proofs runs
+in the orchestrator through `libwqc_stark_verifier` (FFI), not here.
 
-**Example request:**
+**`pcs_memory_policy`** in `/sysinfo` mirrors this process's `WQC_PCS_MEMORY_POLICY`.
+`wqc-node` requires `spill` before bidding on PCS open calls.
 
-```json
-{
-  "task_id": "sub-task-1",
-  "circuit_id": "abc123…",
-  "node_id": "12D3Koo…",
-  "qubit_count": 3,
-  "original_qubit_count": 26,
-  "slice_id": "0",
-  "slice_assignments": [],
-  "mps_max_bond_dim": 128,
-  "circuit": [
-    { "type": "H", "params": [0] },
-    { "type": "CCNOT", "params": [0, 1, 2] }
-  ]
-}
-```
-
-**Example response:**
-
-```json
-{
-  "task_id": "sub-task-1",
-  "status": "success",
-  "complex_result": { "real": 0.3535533905932738, "imag": 0.0 },
-  "proof": {
-    "public_inputs": {
-      "circuit_id": "abc123…",
-      "sub_task_id": "sub-task-1",
-      "node_id": "12D3Koo…",
-      "slice_id": "0",
-      "output_result_hash": "deadbeef…"
-    },
-    "stark_proof_b64": "…"
-  },
-  "work_report": {
-    "trace_rows": 42,
-    "gate_count": 2,
-    "compute_wall_ms": 12,
-    "prove_wall_ms": 340,
-    "proof_bytes": 65536
-  }
-}
-```
-
-`complex_result` is the amplitude at computational basis |0…0⟩ on free wires after TN contraction.
-
-### `POST /verify`
-
-Verifies `stark_proof_b64` against the five public inputs. Does not re-run the circuit.
-
-```json
-{
-  "proof": {
-    "public_inputs": { "…": "…" },
-    "stark_proof_b64": "…"
-  }
-}
-```
-
-Success: `200` with `{ "valid": true, "reason": null }`.
-Invalid proof: `403` with `{ "valid": false, "reason": "…" }`.
-
-### `GET /sysinfo`
-
-Returns host metrics and prove-time configuration for node scheduling and PCS open-call gating:
-
-```json
-{
-  "system_memory_used_kb": 1048576,
-  "system_memory_total_kb": 8388608,
-  "cpu_usage_percent": 12.5,
-  "tn_backend_requested": "webgpu",
-  "tn_backend_active": "webgpu",
-  "mps_max_bond_dim": 128,
-  "pcs_memory_policy": "spill"
-}
-```
-
-`pcs_memory_policy` mirrors this core process's `WQC_PCS_MEMORY_POLICY`. `wqc-node` probes it before bidding on PCS open calls.
-
-### Error handling
-
-| HTTP | When | Typical cause |
-|------|------|----------------|
-| `400` | Bad request | Invalid qubit index, compact-register mismatch, insufficient RAM for requested χ |
-| `403` | Forbidden | `/verify` — STARK transcript or public inputs invalid |
-| `500` | Internal error | Contraction or proving failure |
-
-There is no `503` path and no `memory_cost_kb` request field.
+**Error bodies are `text/plain`**, except `/verify`, which returns a JSON
+`VerifyResponse` on `403`. There is no `503` path and no `memory_cost_kb` request field.
 
 ## Testing
 

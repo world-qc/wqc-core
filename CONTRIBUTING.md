@@ -45,7 +45,8 @@ cargo run
 # Default: Unix domain socket at /tmp/wqc-core.sock (see README for env vars)
 ```
 
-See [README.md](README.md) for API endpoints, configuration, and trace semantics (`doc/trace-spec.md`).
+See [`openapi/openapi.yaml`](openapi/openapi.yaml) for the HTTP contract, and
+[README.md](README.md) for configuration and trace semantics (`doc/trace-spec.md`).
 
 ## Making Changes
 
@@ -68,6 +69,7 @@ Use short, descriptive names, for example:
 - Keep STARK public-input binding and trace layout changes backward-compatible unless versioned intentionally.
 - Follow common Rust conventions (`cargo fmt`, idiomatic error handling).
 - Align execution-trace changes with `doc/trace-spec.md` and cross-check against `wqc-stark-engine` when touching proofs.
+- HTTP request/response JSON lives in [`openapi/openapi.yaml`](openapi/openapi.yaml). Update it in the same pull request as handler or payload struct changes. `cargo test --test openapi_spec` checks the path inventory against `src/main.rs`.
 
 ## Checks
 
@@ -91,7 +93,7 @@ A good pull request:
 - Links related issues (for example, `Fixes #123`)
 - Passes local checks listed above
 - Keeps unrelated changes out of the diff
-- Notes any API, trace-format, or proof-binding changes clearly
+- Notes any API, trace-format, or proof-binding changes clearly (HTTP: update `openapi/openapi.yaml`)
 
 Maintainers may request changes or suggest an alternative approach. Once approved, your contribution will be merged.
 
