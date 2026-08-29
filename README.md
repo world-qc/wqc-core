@@ -72,38 +72,31 @@ response JSON. The table below is an index only.
 There is no auth layer and CORS is permissive. This API is for `wqc-node` on the same
 host; do not expose it to a network.
 
-## Semantics that JSON Schema does not capture
+## Payload semantics
+
+Gate grammar, measurement rules, `output_mode`, `counts` key order, determinism, and
+scale limits are normative in
+[wqc-docs `spec/circuit-payload.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md).
+They apply to the whole pipeline, not just this process. The notes below are specific to
+`wqc-core`.
 
 **Gate `params` shape**: single-parameter gates (`H`, `X`, `Y`, `Z`, `T`, `S`, `RESET`)
-take a **bare integer**, not a one-element array — `{"type": "H", "params": [0]}` is a
-`400`. Circuits submitted to the orchestrator may use `[0]`; `wqc-node` flattens
+take a **bare integer** here, not a one-element array — `{"type": "H", "params": [0]}` is
+a `400`. Circuits submitted to the orchestrator may use `[0]`; `wqc-node` flattens
 one-element arrays (`normalize_gate_params`), including inside `IF.params.gate`, before
-calling `/compute`.
+calling `/compute`. Do not post a client payload to `/compute` unchanged.
 
 **Unknown fields are ignored**, so `wqc-node` may send extra keys such as
 `parent_task_id` or `required_votes`.
 
-**`output_mode`**
-
-| Mode | Returns | STARK proves |
-|------|---------|--------------|
-| `statevector_scalar` | `complex_result` (amplitude at \|0…0⟩) | Unitary TN trace |
-| `sample_counts` | `sample_result.counts` + `shots` | Unitary TN trace only; `output_result_hash` binds canonical counts JSON |
-| `expectation` | `expectation_result.values` (Pauli sums) | Unitary TN trace only; `output_result_hash` binds canonical expectation JSON |
-
-**X/Y basis**: `MEASURE` is Z-only. For `sample_counts`, insert `H` (X) or `RX(-π/2)` (Y) before `MEASURE`. For `expectation`, use Pauli `X`/`Y` in `observables`. See `src/basis.rs` and `wqc-docs/examples/circuits/sample/`.
-
-**`counts` bitstring**: Qiskit-compatible — **rightmost character = `cbit 0`**.
-
-**Sampling scope**: terminal `MEASURE` runs via full statevector projection, so it is
-bounded in practice by `qubit_count`. Mid-circuit semantics (`RESET`, `IF`, or a unitary
-after the first `MEASURE`) switch to trajectory sampling and require
-`qubit_count ≤ 20`. Multi-slice `sample_counts` is not supported; use single-slice or
-small circuits.
+**Sampling strategy**: terminal `MEASURE` uses full statevector projection. Mid-circuit
+semantics (`RESET`, `IF`, or a unitary after the first `MEASURE`) switch to trajectory
+sampling, which this process caps at `qubit_count ≤ 20`. Multi-slice `sample_counts` is
+not supported; use single-slice or small circuits.
 
 **`distribution_proof`** reports how strongly the transcript binds the sampled
 distribution. `unitary_trace_only` means quorum still relies on the canonical counts
-hash under a fixed seed. The `*_linked_*` schemes are derived by the orchestrator, not
+hash under the shared seed. The `*_linked_*` schemes are derived by the orchestrator, not
 returned here.
 
 **`complex_result`** is always present, even in `sample_counts` and `expectation`
@@ -118,6 +111,9 @@ in the orchestrator through `libwqc_stark_verifier` (FFI), not here.
 
 **Error bodies are `text/plain`**, except `/verify`, which returns a JSON
 `VerifyResponse` on `403`. There is no `503` path and no `memory_cost_kb` request field.
+
+**X/Y basis** helpers live in `src/basis.rs`; reference payloads are under
+[`wqc-docs/examples/circuits/`](https://github.com/world-qc/wqc-docs/tree/main/examples/circuits).
 
 ## Testing
 

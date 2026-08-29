@@ -20,6 +20,8 @@ info:
     Single-parameter gates take a **bare integer**, not a one-element array.
     Clients of the orchestrator may write `[0]`; `wqc-node` flattens
     one-element arrays (`normalize_gate_params`) before calling `/compute`.
+    That asymmetry is normative in
+    [circuit-payload.md §1.1](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md#11-two-params-dialects).
 
     Unknown request fields are ignored, so `wqc-node` may send extra keys
     (for example `parent_task_id`, `required_votes`).
@@ -29,7 +31,10 @@ info:
 
     Protocol meaning (STARK transcript, public inputs, slice contract) lives
     in [wqc-docs](https://github.com/world-qc/wqc-docs) and
-    [`doc/trace-spec.md`](../doc/trace-spec.md).
+    [`doc/trace-spec.md`](../doc/trace-spec.md). Circuit payload semantics —
+    gate grammar, measurement rules, output modes, determinism, scale limits —
+    are normative in
+    [wqc-docs `spec/circuit-payload.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md).
   license:
     name: GPL-3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -316,6 +321,9 @@ components:
       type: string
       enum: [statevector_scalar, sample_counts, expectation]
       default: statevector_scalar
+      description: |
+        Selects the result shape and which digest the STARK binds. See
+        [circuit-payload.md §3](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md#3-output-modes).
 
     MeasureParams:
       type: object
@@ -472,7 +480,10 @@ components:
       properties:
         label:
           type: string
-          description: Length must equal `qubit_count`; alphabet I, X, Y, Z
+          description: |
+            Pauli string over `I`, `X`, `Y`, `Z`; length must equal
+            `qubit_count`. Rightmost character applies to qubit 0 (same
+            Qiskit order as `counts` keys).
         coeff:
           $ref: "#/components/schemas/ComplexCoeff"
 
