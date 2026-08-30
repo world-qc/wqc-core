@@ -1,41 +1,41 @@
 # wqc-core (The Engine)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Status: Alpha](https://img.shields.io/badge/Status-Alpha-yellow.svg)]()
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)]()
 [![CI](https://github.com/world-qc/wqc-core/actions/workflows/ci.yml/badge.svg)](https://github.com/world-qc/wqc-core/actions/workflows/ci.yml)
+[![API Reference](https://img.shields.io/badge/API-Reference-blue)](https://world-qc.github.io/wqc-docs/core/)
 
 `wqc-core` is the computational heart of the World Quantum Computer (WQC) protocol.
 It is a Rust quantum circuit executor optimized for **Decentralized Proof of Useful Work (D-PoUW)**:
 each slice is contracted as a **tensor network** (default: bond-truncated MPS), then proven with a zk-STARK.
+
+## Role in the WQC pipeline
+
+```
+client → wqc-orchestrator → wqc-node → wqc-core (this repo)
+```
+
+In production, **[`wqc-node`](https://github.com/world-qc/wqc-node)** on the same host
+starts this process and calls its HTTP API for each slice. Direct `/compute` access is
+for local development, integration tests, and debugging — not for end-user clients.
+
+Swarm slice delivery (orchestrator split → libp2p dispatch → one core instance per slice)
+is described in [wqc-docs `spec/architecture-current.md` §3](https://github.com/world-qc/wqc-docs/blob/main/spec/architecture-current.md#3-task-lifecycle)
+(cut, dispatch, compute). MPI-style in-core state sharding is not a whitepaper goal.
 
 ## Key Features
 
 - **Tensor-network execution**: Gate-by-gate MPS contraction with SVD bond truncation (`O(N · χ²)` memory).
 - **zk-STARK D-PoUW**: Plonky3 uni-STARK over the execution trace (`wqc-stark-engine`); no re-execution on verify.
 - **Compact-register slices**: Width `qubit_count = N − |assignments|`; scalar output = ⟨0…0|ψ⟩ amplitude.
-- **Public-input binding**: `circuit_id`, `sub_task_id`, `node_id`, `slice_id`, `output_result_hash` in every proof.
+- **Gate set**: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT, terminal Z-basis **MEASURE**, mid-circuit **RESET** and classical **IF**.
+- **Output modes**: `statevector_scalar` (default), `sample_counts` (seed-bound histograms, Qiskit bitstring order), and `expectation` (Pauli observables; no `MEASURE` gates).
+- **Public-input binding**: `circuit_id`, `sub_task_id`, `node_id`, `slice_id`, `output_result_hash`, plus `measurement_spec_hash` and `security_level` when the proof binds them.
 - **Orchestrator χ hints**: Per-task `mps_max_bond_dim` capped by node env `WQC_MPS_MAX_BOND_DIM`.
-- **WorkReport metrics**: `trace_rows`, `gate_count`, `compute_wall_ms`, `prove_wall_ms`, `proof_bytes` for Gas settlement upstream.
+- **WebGPU MPS kernels**: `--features webgpu`, `WQC_TN_BACKEND=webgpu` (see `doc/tn-engine.md`).
+- **WorkReport metrics**: `trace_rows`, `gate_count`, `compute_wall_ms`, `prove_wall_ms`, `proof_bytes`, plus `tn_backend` and `vram_peak_bytes` on the WebGPU path — forwarded upstream for gas settlement.
 
-## Technical Architecture & Roadmap
-
-### Phase 1: Foundation (completed)
-
-- Universal gate set: H, X, Y, Z, T, S, CNOT, CZ, RX, RY, RZ, CCNOT, **MEASURE** (terminal Z-basis).
-- Compute → prove → verify cycle with cross-language hash alignment (Rust / Go).
-- HTTP API over Unix domain socket (default) or TCP.
-
-### Phase 2: Scaling & distribution (current)
-
-- [x] zk-STARK integration (trace-schema v2, multi-target AIR).
-- [x] TN engine Phase 2a (`src/tn/`, compact-register boundaries).
-- [x] MPS bond truncation Phase 2b (default backend). See `doc/tn-engine.md`.
-- [x] Orchestrator `mps_max_bond_dim` per slice (`min(env χ, task χ)`).
-- [x] WebGPU MPS kernels (`--features webgpu`, `WQC_TN_BACKEND=webgpu`).
-- [x] **`sample_counts` execution**: terminal `MEASURE`, seed-bound histograms, Qiskit bitstring order.
-- [x] **Swarm slice delivery (§3.1)**: orchestrator + `wqc-node` responsibility (compact-register split → libp2p dispatch → 1 core = 1 slice). MPI-style in-core state sharding is not a whitepaper goal.
-
-### Phase 3: Sovereign network (upcoming)
+## Upcoming
 
 - Physical QPU proxy.
 - On-chain economic layer (orchestrator / L2).
@@ -55,6 +55,8 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `RAYON_NUM_THREADS` | `1` | Worker threads for prove (lower on memory-constrained hosts) |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
+
+On Windows, `WQC_CONNECTION_MODE=uds` is unsupported; the process falls back to TCP automatically.
 
 ## API Reference
 
@@ -78,11 +80,14 @@ no TLS or auth — use only on loopback-trusted hosts.
 
 ## Payload semantics
 
+JSON field types and required keys live in [`openapi/openapi.yaml`](openapi/openapi.yaml).
+The notes below document **behavior that schemas alone cannot express** — validation
+rules, cross-process normalization, and proof-binding edge cases specific to this process.
+
 Gate grammar, measurement rules, `output_mode`, `counts` key order, determinism, and
 scale limits are normative in
 [wqc-docs `spec/circuit-payload.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md).
-They apply to the whole pipeline, not just this process. The notes below are specific to
-`wqc-core`.
+They apply to the whole pipeline, not just this process.
 
 **Gate `params` shape**: single-parameter gates (`H`, `X`, `Y`, `Z`, `T`, `S`, `RESET`)
 take a **bare integer** here, not a one-element array — `{"type": "H", "params": [0]}` is
@@ -92,6 +97,16 @@ calling `/compute`. Do not post a client payload to `/compute` unchanged.
 
 **Unknown fields are ignored**, so `wqc-node` may send extra keys such as
 `parent_task_id` or `required_votes`.
+
+**`security_level`**: orchestrator tier (`low`, `normal`, `high`, `ultra`) copied onto
+each slice. It selects the FRI query ladder for leaf prove/verify and is bound into STARK
+public inputs when non-empty. Empty or absent uses the engine default (40 queries). See
+[wqc-docs `spec/zk-STARK.md` §5.1](https://github.com/world-qc/wqc-docs/blob/main/spec/zk-STARK.md).
+
+**`noise_model`**: optional depolarizing / readout noise applied during mid-circuit
+trajectory sampling only. Noise is **not bound into the STARK**; a noisy run downgrades
+distribution binding to unbound. Treat as simulation/research, not verifiable production.
+See [circuit-payload.md §6](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md).
 
 **Sampling strategy**: terminal `MEASURE` uses full statevector projection. Mid-circuit
 semantics (`RESET`, `IF`, or a unitary after the first `MEASURE`) switch to trajectory
@@ -122,16 +137,20 @@ in the orchestrator through `libwqc_stark_verifier` (FFI), not here.
 ## Testing
 
 ```bash
-cargo test --release                 # CI suite (skips #[ignore])
-cargo test --release -- --ignored  # Plonky3 STARK prove/verify roundtrips (local; can take a long time)
+cargo test --release --locked          # CI suite (skips #[ignore])
+cargo test --release --locked -- --ignored   # Plonky3 STARK prove/verify roundtrips (local; can take a long time)
 ```
 
-GitHub Actions runs the fast suite only (`timeout-minutes: 45`). Heavy STARK proves are `#[ignore]` — same policy as `wqc-stark-engine`.
+GitHub Actions runs the fast release suite only (`timeout-minutes: 45`). Heavy STARK
+proves are `#[ignore]` — same policy as `wqc-stark-engine`. Before opening a pull request,
+also run the full check list in [CONTRIBUTING.md](CONTRIBUTING.md) (`cargo test --locked`
+without `--release` is acceptable for faster local iteration).
 
 ## Documentation
 
 - [`doc/tn-engine.md`](doc/tn-engine.md) — MPS backend, χ configuration, execution flow
 - [`doc/trace-spec.md`](doc/trace-spec.md) — STARK trace columns (v2, `TRACE_WIDTH = 11`)
+- [wqc-docs `spec/architecture-current.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/architecture-current.md) — live swarm topology and task lifecycle
 - [wqc-docs `spec/circuit-payload.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md) — shared payload semantics
 - [wqc-docs `spec/zk-STARK.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/zk-STARK.md) — proof system and verification
 - [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine) — AIR prover/verifier crate this process calls
@@ -140,8 +159,17 @@ GitHub Actions runs the fast suite only (`timeout-minutes: 45`). Heavy STARK pro
 
 - **Rust**: 1.95+ (see `AGENTS.md`)
 - **Build layout**: clone [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine) as a **sibling** directory (`../wqc-stark-engine/`). `Cargo.toml` `[patch]` uses the local checkout; see [CONTRIBUTING.md](CONTRIBUTING.md).
-- **RAM**: Depends on `N` and χ; devnet compose often sets `WQC_MPS_MAX_BOND_DIM=256`
+- **RAM**: Scales with circuit size; [`wqc-miner`](https://github.com/world-qc/wqc-miner) caps host usage via `max_memory_gb` in [`settings.toml`](https://github.com/world-qc/wqc-miner/blob/main/settings.toml.example). Default tensor-network accuracy ceiling is χ=`128` in core; advanced operators may `export WQC_MPS_MAX_BOND_DIM=…` before launch (see [`doc/tn-engine.md`](doc/tn-engine.md))
 - **Key deps**: `nalgebra` (SVD), `wqc-stark-engine` (Plonky3), `axum`, `sha3`
+
+### Quick start
+
+```bash
+git clone https://github.com/world-qc/wqc-core.git
+git clone https://github.com/world-qc/wqc-stark-engine.git   # sibling: ../wqc-stark-engine
+cd wqc-core && cargo build && cargo run
+# curl --unix-socket /var/run/wqc-core.sock http://localhost/health
+```
 
 One concurrent `/compute` per process is recommended; the node orchestrates single-task execution per core instance.
 
