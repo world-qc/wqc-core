@@ -44,7 +44,7 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 default = []
 webgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
-# Monorepo local override — sibling `wqc-stark-engine/` (Docker build uses monorepo context).
+# Sibling-repo local override — checkout `wqc-stark-engine/` next to `wqc-core/` (Docker build uses the same sibling layout).
 [patch."https://github.com/world-qc/wqc-stark-engine.git"]
 wqc-stark-core = { path = "../wqc-stark-engine/wqc-stark-core" }
 

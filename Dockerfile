@@ -5,7 +5,7 @@
 #     wqc-core/          ← this Dockerfile
 #     wqc-stark-engine/wqc-stark-core/
 #
-# From the parent directory (monorepo root or a folder with both clones):
+# From the parent directory (sibling checkouts under one folder):
 #   docker build -f wqc-core/Dockerfile -t world-qc/wqc-core:latest .
 #
 # Uses Cargo.toml [patch] → ../wqc-stark-engine/wqc-stark-core (no git fetch in builder).
