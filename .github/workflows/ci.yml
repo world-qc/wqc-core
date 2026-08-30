@@ -22,22 +22,12 @@ jobs:
         with:
           path: wqc-core
 
-      # wqc-stark-engine is private until published; GitHub App needs Contents: Read on that repo.
-      - name: Generate token for private deps
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.WQC_APP_ID }}
-          private-key: ${{ secrets.WQC_APP_PRIVATE_KEY }}
-          owner: world-qc
-          repositories: wqc-stark-engine
-
+      # Sibling layout satisfies Cargo.toml [patch] → ../wqc-stark-engine/wqc-stark-core
       - name: Checkout wqc-stark-engine
         uses: actions/checkout@v4
         with:
           repository: world-qc/wqc-stark-engine
           path: wqc-stark-engine
-          token: ${{ steps.app-token.outputs.token }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

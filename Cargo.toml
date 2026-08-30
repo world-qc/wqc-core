@@ -15,7 +15,7 @@ rayon = "1.8"
 # MPS bond truncation (SVD)
 nalgebra = "0.33"
 # zk-STARKs Engine Integration
-wqc-stark-engine = { git = "ssh://git@github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core", features = ["plonky3-stark"] }
+wqc-stark-engine = { git = "https://github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core", features = ["plonky3-stark"] }
 p3-field = "0.6.1"
 p3-mersenne-31 = "0.6.1"
 # Utilities
@@ -45,7 +45,7 @@ default = []
 webgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 # Monorepo local override — sibling `wqc-stark-engine/` (Docker build uses monorepo context).
-[patch."ssh://git@github.com/world-qc/wqc-stark-engine.git"]
+[patch."https://github.com/world-qc/wqc-stark-engine.git"]
 wqc-stark-core = { path = "../wqc-stark-engine/wqc-stark-core" }
 
 [profile.release]

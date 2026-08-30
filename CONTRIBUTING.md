@@ -21,13 +21,15 @@ If you plan a larger change, please open an issue first so we can discuss the ap
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) **1.95** or newer
-- Sibling checkout of [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine) (required by `Cargo.toml` `[patch]`)
+- Sibling checkout of [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine).
+  `Cargo.toml` `[patch]` resolves `wqc-stark-core` from `../wqc-stark-engine/wqc-stark-core`
+  so you can iterate on both crates without editing the git dependency URL.
 
 ### Clone and build
 
 ```bash
 git clone https://github.com/world-qc/wqc-core.git
-git clone https://github.com/world-qc/wqc-stark-engine.git   # sibling directory
+git clone https://github.com/world-qc/wqc-stark-engine.git   # sibling: ../wqc-stark-engine
 cd wqc-core
 cargo build
 ```
@@ -42,7 +44,7 @@ cargo build --features webgpu
 
 ```bash
 cargo run
-# Default: Unix domain socket at /tmp/wqc-core.sock (see README for env vars)
+# Default: Unix domain socket at /var/run/wqc-core.sock (see README for env vars)
 ```
 
 See [`openapi/openapi.yaml`](openapi/openapi.yaml) for the HTTP contract, and

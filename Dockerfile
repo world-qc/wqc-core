@@ -1,9 +1,14 @@
 # syntax=docker/dockerfile:1
-# Build from monorepo root (world-qc):
+# Build context must include BOTH repositories as siblings under one parent:
+#
+#   parent/
+#     wqc-core/          ← this Dockerfile
+#     wqc-stark-engine/wqc-stark-core/
+#
+# From the parent directory (monorepo root or a folder with both clones):
 #   docker build -f wqc-core/Dockerfile -t world-qc/wqc-core:latest .
 #
-# Uses [patch] in wqc-core/Cargo.toml → ../wqc-stark-engine/wqc-stark-core
-# (no git SSH fetch).
+# Uses Cargo.toml [patch] → ../wqc-stark-engine/wqc-stark-core (no git fetch in builder).
 
 FROM rust:1.95-slim-bookworm AS builder
 

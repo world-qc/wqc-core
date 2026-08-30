@@ -128,5 +128,8 @@ The verifier re-expands the embedded trace, recomputes `air_sum`, and checks `ai
 
 ## Status
 
-Trace alignment between `wqc-core` and `wqc-stark-core` is complete for multi-target circuits. See
-`wqc-stark-engine/docs/PHASE2_TRACE_ALIGNMENT.md` for the checklist and test coverage.
+Trace alignment between `wqc-core` and `wqc-stark-core` is complete for multi-target circuits.
+Cross-check the AIR rules and transcript layout in
+[`wqc-stark-engine` README](https://github.com/world-qc/wqc-stark-engine) and
+[`wqc-docs/spec/zk-STARK.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/zk-STARK.md).
+Run `cargo test --release -- --ignored` in both repositories for full prove/verify roundtrips.

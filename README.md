@@ -47,7 +47,8 @@ each slice is contracted as a **tensor network** (default: bond-truncated MPS), 
 | `WQC_MPS_MAX_BOND_DIM` | `128` | Node ceiling on MPS bond dimension χ |
 | `WQC_TN_BACKEND` | `cpu` | `webgpu` offloads 1q/merge kernels (needs `--features webgpu`) |
 | `WQC_CONNECTION_MODE` | `uds` | `uds` (Unix socket) or `tcp` |
-| `WQC_CORE_TCP_PORT` | `3000` | TCP port if connection mode is `tcp` |
+| `WQC_SOCKET_PATH` | `/var/run/wqc-core.sock` | Unix socket path when `WQC_CONNECTION_MODE=uds` |
+| `WQC_CORE_TCP_PORT` | `3000` | TCP port when `WQC_CONNECTION_MODE=tcp` (binds `0.0.0.0`) |
 | `WQC_MAX_MEMORY_GB` | (unset) | PCS memory budget (GiB); unset disables the gate |
 | `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget. Exposed to nodes via `GET /sysinfo` → `pcs_memory_policy` for open-call bid eligibility. |
 | `WQC_PCS_MMCS_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
@@ -58,7 +59,8 @@ Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mp
 ## API Reference
 
 [`openapi/openapi.yaml`](openapi/openapi.yaml) is the source of truth for request and
-response JSON. The table below is an index only.
+response JSON. A rendered reference is published at
+<https://world-qc.github.io/wqc-docs/core/>. The table below is an index only.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -70,7 +72,9 @@ response JSON. The table below is an index only.
 | `GET` | `/health` | Liveness probe polled by `wqc-node` |
 
 There is no auth layer and CORS is permissive. This API is for `wqc-node` on the same
-host; do not expose it to a network.
+host; do not expose it to a network. The default transport is a **Unix domain socket**.
+When `WQC_CONNECTION_MODE=tcp`, the process binds **`0.0.0.0`** (all interfaces) with
+no TLS or auth — use only on loopback-trusted hosts.
 
 ## Payload semantics
 
@@ -126,13 +130,16 @@ GitHub Actions runs the fast suite only (`timeout-minutes: 45`). Heavy STARK pro
 
 ## Documentation
 
-- `doc/tn-engine.md` — MPS backend, χ configuration, execution flow
-- `doc/trace-spec.md` — STARK trace columns (v2, `TRACE_WIDTH = 11`)
-- `whitepaper_gap.md` — WP v0.3 alignment and remaining gaps
+- [`doc/tn-engine.md`](doc/tn-engine.md) — MPS backend, χ configuration, execution flow
+- [`doc/trace-spec.md`](doc/trace-spec.md) — STARK trace columns (v2, `TRACE_WIDTH = 11`)
+- [wqc-docs `spec/circuit-payload.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/circuit-payload.md) — shared payload semantics
+- [wqc-docs `spec/zk-STARK.md`](https://github.com/world-qc/wqc-docs/blob/main/spec/zk-STARK.md) — proof system and verification
+- [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine) — AIR prover/verifier crate this process calls
 
 ## Requirements
 
 - **Rust**: 1.95+ (see `AGENTS.md`)
+- **Build layout**: clone [`wqc-stark-engine`](https://github.com/world-qc/wqc-stark-engine) as a **sibling** directory (`../wqc-stark-engine/`). `Cargo.toml` `[patch]` uses the local checkout; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **RAM**: Depends on `N` and χ; devnet compose often sets `WQC_MPS_MAX_BOND_DIM=256`
 - **Key deps**: `nalgebra` (SVD), `wqc-stark-engine` (Plonky3), `axum`, `sha3`
 
