@@ -287,7 +287,8 @@ impl Gate {
                 (if is_control_active { 1.0 } else { 0.0 }, 1.0, 0.0)
             }
             Gate::RX(_, theta) | Gate::RY(_, theta) | Gate::RZ(_, theta) => {
-                ((theta / 2.0).cos(), (theta / 2.0).sin(), 0.0)
+                // `(ctrl_active, p_cos, p_sin)` — callers take `(_, p_cos, p_sin)`.
+                (0.0, (theta / 2.0).cos(), (theta / 2.0).sin())
             }
             _ => (0.0, 1.0, 0.0),
         }
@@ -586,6 +587,10 @@ mod trace_tests {
                     Gate::RX(0, -std::f64::consts::FRAC_PI_2),
                 ],
             ),
+            ("rx_pi2", vec![Gate::RX(0, std::f64::consts::FRAC_PI_2)]),
+            ("ry_pi2", vec![Gate::RY(0, std::f64::consts::FRAC_PI_2)]),
+            ("rz_pi2", vec![Gate::RZ(0, std::f64::consts::FRAC_PI_2)]),
+            ("y", vec![Gate::Y(0)]),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
             ("h_ccnot_devnet", vec![Gate::H(0), Gate::CCNOT(0, 1, 2)]),
         ];

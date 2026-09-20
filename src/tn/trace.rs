@@ -33,22 +33,27 @@ pub fn execute_with_trace(
                 state.apply_gate(gate)?;
             }
             if traced == 1 {
-                emit_gate_trace(state, gates[i].clone(), &mut trace)?;
+                emit_gate_trace(state, gates[i + silent].clone(), &mut trace)?;
             }
             i += run;
             continue;
         }
 
-        if let Some(run) = consecutive_rx_run(&gates[i..]) {
-            let angle_sum = rx_angle_sum(&gates[i..i + run]);
+        if let Some((run, angle_sum)) = consecutive_rotation_run(&gates[i..]) {
             if is_identity_rotation(angle_sum) {
                 for gate in &gates[i..i + run] {
                     state.apply_gate(gate)?;
                 }
             } else {
-                for gate in &gates[i..i + run] {
-                    emit_gate_trace(state, gate.clone(), &mut trace)?;
-                }
+                // Emit one net-angle rotation so intermediate both-nonzero states are not
+                // fixed-point constrained gate-by-gate (matches H-fold motivation).
+                let net = match &gates[i] {
+                    Gate::RX(t, _) => Gate::RX(*t, angle_sum),
+                    Gate::RY(t, _) => Gate::RY(*t, angle_sum),
+                    Gate::RZ(t, _) => Gate::RZ(*t, angle_sum),
+                    _ => unreachable!("rotation run"),
+                };
+                emit_gate_trace(state, net, &mut trace)?;
             }
             i += run;
             continue;
@@ -84,28 +89,33 @@ fn consecutive_h_run(gates: &[Gate]) -> Option<usize> {
     Some(run)
 }
 
-fn consecutive_rx_run(gates: &[Gate]) -> Option<usize> {
-    let Gate::RX(target, _) = gates.first()? else {
-        return None;
+fn consecutive_rotation_run(gates: &[Gate]) -> Option<(usize, f64)> {
+    let (target, first_angle, axis) = match gates.first()? {
+        Gate::RX(t, a) => (*t, *a, 0u8),
+        Gate::RY(t, a) => (*t, *a, 1u8),
+        Gate::RZ(t, a) => (*t, *a, 2u8),
+        _ => return None,
     };
     let mut run = 1usize;
+    let mut angle_sum = first_angle;
     while run < gates.len() {
-        match &gates[run] {
-            Gate::RX(t, _) if t == target => run += 1,
+        match (&gates[run], axis) {
+            (Gate::RX(t, a), 0) if *t == target => {
+                angle_sum += *a;
+                run += 1;
+            }
+            (Gate::RY(t, a), 1) if *t == target => {
+                angle_sum += *a;
+                run += 1;
+            }
+            (Gate::RZ(t, a), 2) if *t == target => {
+                angle_sum += *a;
+                run += 1;
+            }
             _ => break,
         }
     }
-    Some(run)
-}
-
-fn rx_angle_sum(gates: &[Gate]) -> f64 {
-    gates
-        .iter()
-        .filter_map(|gate| match gate {
-            Gate::RX(_, angle) => Some(*angle),
-            _ => None,
-        })
-        .sum()
+    Some((run, angle_sum))
 }
 
 fn is_identity_rotation(angle_sum: f64) -> bool {
