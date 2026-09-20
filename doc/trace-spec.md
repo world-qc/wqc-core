@@ -74,8 +74,16 @@ before emitting trace rows:
 AIR rotation constraints distinguish RX / RY / RZ via Lagrange on `gate_id` (10/11/12)
 while sharing the `sel_rot` enable bit.
 
-Physics (MPS state) always applies the full gate list. Trace folding is an AIR-encoding
-detail only; proofs bind `output_result_hash` from the executed state.
+Dense (≤16 qubit) amplitude sampling locks the ancillary computational-basis **subspace
+index** on the pre-gate row. Post-gate amplitudes are then computed with the **same
+Mersenne31 fixed-point arithmetic as the AIR** (`next * SCALE = curr * p_cos ± …`), and
+carried forward for later gates on the same target. Independently rounding physical
+`f64` pre/post and `cos/sin` makes `round(a)*round(b)` diverge from `round(a*b)` (e.g.
+Bell then `RX(0.3)`). Silent H / net-zero rotation folds clear the carried AIR amps for
+that target because physics advanced without a matching AIR row.
+
+Physics (MPS state) always applies the full gate list. Trace folding and AIR-exact
+snapping are encoding details; proofs bind `output_result_hash` from the executed state.
 
 ### Gate ids (`gate_id` column)
 

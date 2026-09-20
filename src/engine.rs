@@ -456,18 +456,20 @@ mod trace_tests {
         assert_approx_eq(trace_at(&trace, 0, 9), 0.0); // target qubit
         assert_approx_eq(trace_at(&trace, 0, 5), 1.0); // v0_re for |0>
 
-        let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+        // Post/terminal amplitudes are AIR-exact fixed-point (inv_sqrt2 → 7071/10000),
+        // not raw f64 1/√2, so the host twin of QuantumExecutionAir stays air_sum=0.
+        let inv_sqrt2_fp = 7071.0 / wqc_stark_engine::FIXED_POINT_SCALE;
         // Post-gate row
         assert_approx_eq(trace_at(&trace, 1, 0), 0.0);
         assert_approx_eq(trace_at(&trace, 1, 9), 0.0);
-        assert_approx_eq(trace_at(&trace, 1, 5), inv_sqrt2);
-        assert_approx_eq(trace_at(&trace, 1, 7), inv_sqrt2);
+        assert_approx_eq(trace_at(&trace, 1, 5), inv_sqrt2_fp);
+        assert_approx_eq(trace_at(&trace, 1, 7), inv_sqrt2_fp);
 
         // Terminal boundary row
         assert_approx_eq(trace_at(&trace, 2, 0), 0.0);
         assert_approx_eq(trace_at(&trace, 2, 9), 0.0);
-        assert_approx_eq(trace_at(&trace, 2, 5), inv_sqrt2);
-        assert_approx_eq(trace_at(&trace, 2, 7), inv_sqrt2);
+        assert_approx_eq(trace_at(&trace, 2, 5), inv_sqrt2_fp);
+        assert_approx_eq(trace_at(&trace, 2, 7), inv_sqrt2_fp);
     }
 
     #[test]
@@ -590,6 +592,22 @@ mod trace_tests {
             ("rx_pi2", vec![Gate::RX(0, std::f64::consts::FRAC_PI_2)]),
             ("ry_pi2", vec![Gate::RY(0, std::f64::consts::FRAC_PI_2)]),
             ("rz_pi2", vec![Gate::RZ(0, std::f64::consts::FRAC_PI_2)]),
+            // Entangled control: independent max-prob subspace picks can flip across RX.
+            (
+                "bell_rx0",
+                vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RX(0, 0.3)],
+            ),
+            (
+                "keepalive_like",
+                vec![
+                    Gate::H(0),
+                    Gate::RX(1, -0.7),
+                    Gate::CNOT(0, 1),
+                    Gate::RY(0, 0.3),
+                    Gate::RZ(1, std::f64::consts::FRAC_PI_4),
+                    Gate::CZ(0, 1),
+                ],
+            ),
             ("y", vec![Gate::Y(0)]),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
             ("h_ccnot_devnet", vec![Gate::H(0), Gate::CCNOT(0, 1, 2)]),
