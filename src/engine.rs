@@ -590,6 +590,22 @@ mod trace_tests {
             ("rx_pi2", vec![Gate::RX(0, std::f64::consts::FRAC_PI_2)]),
             ("ry_pi2", vec![Gate::RY(0, std::f64::consts::FRAC_PI_2)]),
             ("rz_pi2", vec![Gate::RZ(0, std::f64::consts::FRAC_PI_2)]),
+            // Entangled control: independent max-prob subspace picks can flip across RX.
+            (
+                "bell_rx0",
+                vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RX(0, 0.3)],
+            ),
+            (
+                "keepalive_like",
+                vec![
+                    Gate::H(0),
+                    Gate::RX(1, -0.7),
+                    Gate::CNOT(0, 1),
+                    Gate::RY(0, 0.3),
+                    Gate::RZ(1, std::f64::consts::FRAC_PI_4),
+                    Gate::CZ(0, 1),
+                ],
+            ),
             ("y", vec![Gate::Y(0)]),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
             ("h_ccnot_devnet", vec![Gate::H(0), Gate::CCNOT(0, 1, 2)]),
