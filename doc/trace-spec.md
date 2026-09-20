@@ -68,8 +68,11 @@ before emitting trace rows:
 | --- | --- | --- |
 | `H(t)^n` (n even) | apply all n gates | no rows (H∘H = I) |
 | `H(t)^n` (n odd) | apply all n gates | one H pre/post pair |
-| `RX(t,θ₁)…RX(t,θₖ)` with Σθᵢ ≡ 0 (mod 2π) | apply all | no rows (net identity) |
-| `RX` run with non-zero net angle | apply all | one pre/post pair per gate (unchanged) |
+| `RX/RY/RZ(t,θ₁)…` with Σθᵢ ≡ 0 (mod 2π) | apply all | no rows (net identity) |
+| `RX/RY/RZ` run with non-zero net angle | apply all | **one** pre/post pair with net Σθ |
+
+AIR rotation constraints distinguish RX / RY / RZ via Lagrange on `gate_id` (10/11/12)
+while sharing the `sel_rot` enable bit.
 
 Physics (MPS state) always applies the full gate list. Trace folding is an AIR-encoding
 detail only; proofs bind `output_result_hash` from the executed state.
