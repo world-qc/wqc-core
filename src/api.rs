@@ -153,6 +153,9 @@ pub struct SystemInfo {
     pub mps_max_bond_dim: usize,
     /// Prove-time PCS RAM gate (`WQC_PCS_MEMORY_POLICY` on this core process).
     pub pcs_memory_policy: String,
+    /// Adapter `max_buffer_size` when WebGPU is active (wgpu allocation ceiling ≈ VRAM proxy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vram_budget_bytes: Option<u64>,
 }
 
 fn validate_task(
@@ -583,6 +586,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
     );
 
     let tn = crate::tn::tn_engine_status();
+    let vram_budget_bytes = crate::tn::vram_budget_bytes_for_sysinfo();
 
     Json(SystemInfo {
         system_memory_used_kb: sys.used_memory() / 1024,
@@ -593,5 +597,6 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         tn_backend_note: tn.note.clone(),
         mps_max_bond_dim: tn.mps_max_bond_dim,
         pcs_memory_policy: PcsMemoryPolicy::from_env().as_str().to_string(),
+        vram_budget_bytes,
     })
 }

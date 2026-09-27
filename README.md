@@ -70,7 +70,7 @@ response JSON. A rendered reference is published at
 | `POST` | `/leaf_pcs` | Build leaf PCS bundle from an existing leaf STARK proof |
 | `POST` | `/verify` | Stateless STARK verification |
 | `GET` | `/gates` | Supported gate names (feature discovery) |
-| `GET` | `/sysinfo` | Host RAM / CPU snapshot + TN backend + PCS memory policy |
+| `GET` | `/sysinfo` | Host RAM / CPU snapshot + TN backend + PCS memory policy + optional `vram_budget_bytes` (WebGPU) |
 | `GET` | `/health` | Liveness probe polled by `wqc-node` |
 
 There is no auth layer and CORS is permissive. This API is for `wqc-node` on the same

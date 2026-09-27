@@ -100,6 +100,21 @@ pub fn shared_gpu_device() -> Option<Arc<GpuMpsDevice>> {
         .clone()
 }
 
+/// Adapter VRAM budget proxy for `/sysinfo` (`None` when not on WebGPU).
+pub fn vram_budget_bytes_for_sysinfo() -> Option<u64> {
+    #[cfg(feature = "webgpu")]
+    {
+        if tn_engine_status().active != "webgpu" {
+            return None;
+        }
+        shared_gpu_device().map(|d| d.vram_budget_bytes())
+    }
+    #[cfg(not(feature = "webgpu"))]
+    {
+        None
+    }
+}
+
 #[cfg(not(feature = "webgpu"))]
 #[allow(dead_code)]
 pub fn shared_gpu_device() -> Option<()> {

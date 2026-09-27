@@ -49,6 +49,8 @@ pub struct GpuMpsDevice {
     one_qubit_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline,
     peak_bytes: AtomicU64,
+    /// Adapter `max_buffer_size` — wgpu-visible allocation ceiling (typically ≤ device VRAM).
+    vram_budget_bytes: u64,
     one_qubit_layout: wgpu::BindGroupLayout,
     merge_layout: wgpu::BindGroupLayout,
 }
@@ -65,6 +67,8 @@ impl GpuMpsDevice {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))?;
+
+        let vram_budget_bytes = adapter.limits().max_buffer_size;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -190,6 +194,7 @@ impl GpuMpsDevice {
             one_qubit_pipeline,
             merge_pipeline,
             peak_bytes: AtomicU64::new(0),
+            vram_budget_bytes,
             one_qubit_layout,
             merge_layout,
         }))
@@ -197,6 +202,11 @@ impl GpuMpsDevice {
 
     pub fn peak_vram_bytes(&self) -> u64 {
         self.peak_bytes.load(Ordering::Relaxed)
+    }
+
+    /// wgpu-visible buffer allocation ceiling from the adapter (`max_buffer_size`).
+    pub fn vram_budget_bytes(&self) -> u64 {
+        self.vram_budget_bytes
     }
 
     fn track_allocation(&self, bytes: u64) {
