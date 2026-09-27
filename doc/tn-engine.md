@@ -47,6 +47,11 @@ Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgp
 
 `WorkReport` includes `tn_backend` (`cpu` / `webgpu`) and `vram_peak_bytes` (peak GPU buffer allocation per task).
 
+`GET /sysinfo` includes `vram_budget_bytes` when WebGPU is active: the adapter’s
+`max_buffer_size` (wgpu-visible allocation ceiling, typically ≤ device VRAM). This is a
+**proxy**, not free VRAM. `wqc-node` may take `min(RAM budget, VRAM budget)` for bidding;
+PCS gates still use system RAM / `WQC_MAX_MEMORY_GB` only.
+
 Shaders: `src/tn/gpu/shaders.wgsl`. Complex numbers use `vec2<f32>` on GPU; results are promoted to `f64` before SVD and trace emission.
 
 ## Execution flow
