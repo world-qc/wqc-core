@@ -62,7 +62,7 @@ async fn main() {
     // --- 3. Dynamic Listener Binding based on Configured Mode ---
     #[cfg(not(unix))]
     let connection_mode = if connection_mode == "uds" {
-        eprintln!("WQC_CONNECTION_MODE=uds is not supported on Windows; using tcp");
+        println!("WQC_CONNECTION_MODE=uds is not supported on Windows; using tcp");
         "tcp".to_string()
     } else {
         connection_mode

@@ -94,10 +94,10 @@ impl MpsState {
         LOG_ONCE.call_once(|| {
             let status = super::engine_status::tn_engine_status();
             match status.active.as_str() {
-                "webgpu" => eprintln!("wqc-core: WebGPU MPS backend active"),
+                "webgpu" => println!("wqc-core: WebGPU MPS backend active"),
                 _ if status.requested == "webgpu" => {
                     if let Some(note) = &status.note {
-                        eprintln!("wqc-core: {note}");
+                        println!("wqc-core: {note}");
                     }
                 }
                 _ => {}

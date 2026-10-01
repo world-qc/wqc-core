@@ -19,7 +19,7 @@ pub fn tn_backend_from_env() -> TnBackend {
         "webgpu" | "gpu" => TnBackend::WebGpu,
         #[cfg(not(feature = "webgpu"))]
         "webgpu" | "gpu" => {
-            eprintln!(
+            println!(
                 "WQC_TN_BACKEND=webgpu requested but wqc-core was built without --features webgpu; using CPU"
             );
             TnBackend::Cpu
