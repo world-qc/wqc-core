@@ -20,6 +20,25 @@ pub struct ComplexResult {
     pub imag: f64,
 }
 
+/// Published real/imag grid. CPU f64 and WebGPU f32 both land on this lattice
+/// before a result is hashed or compared.
+pub const AMPLITUDE_GRID: f64 = 1e-6;
+
+/// Round one component onto [`AMPLITUDE_GRID`] (half away from zero).
+///
+/// `round(x * 1e6) / 1e6` matches Go `math.Round`.
+pub fn snap_amplitude_component(value: f64) -> f64 {
+    (value * 1e6).round() / 1e6
+}
+
+/// Snap both components of a published amplitude.
+pub fn snap_complex_result(result: ComplexResult) -> ComplexResult {
+    ComplexResult {
+        real: snap_amplitude_component(result.real),
+        imag: snap_amplitude_component(result.imag),
+    }
+}
+
 /// Canonical JSON for SHA3-256 hashing — must match orchestrator `ComplexResult.MarshalJSON`.
 pub fn format_go_complex_result_json(result: &ComplexResult) -> String {
     fn format_go_float(val: f64) -> String {
@@ -684,6 +703,32 @@ mod hash_tests {
             imag: 1.0,
         });
         assert_eq!(json, r#"{"real":0.0,"imag":1.0}"#);
+    }
+
+    #[test]
+    fn snap_collapses_cpu_and_gpu_incident_amplitudes() {
+        use super::{snap_amplitude_component, snap_complex_result};
+        let gpu = snap_complex_result(ComplexResult {
+            real: 0.4999999701976776,
+            imag: -0.4999999701976776,
+        });
+        let cpu = snap_complex_result(ComplexResult {
+            real: 0.5000000000000001,
+            imag: -0.5000000000000001,
+        });
+        assert_eq!(gpu, cpu);
+        assert_eq!(gpu.real, 0.5);
+        assert_eq!(gpu.imag, -0.5);
+        assert_eq!(
+            calculate_complex_result_hash(&gpu),
+            calculate_complex_result_hash(&cpu)
+        );
+        assert_eq!(
+            snap_amplitude_component(gpu.real),
+            gpu.real,
+            "snap is stable on the published grid"
+        );
+        assert_eq!(snap_amplitude_component(gpu.imag), gpu.imag);
     }
 
     #[test]
