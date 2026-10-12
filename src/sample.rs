@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{EngineError, Gate, MeasureParams};
+use crate::engine::{snap_amplitude_component, EngineError, Gate, MeasureParams};
 use crate::tn::MpsState;
 
 /// Client output mode for `/compute`.
@@ -118,7 +118,9 @@ pub fn compute_outcome_probabilities(
 
     let mut probs: BTreeMap<String, f64> = BTreeMap::new();
     for (basis, amp) in statevector.iter().enumerate() {
-        let p = amp.re * amp.re + amp.im * amp.im;
+        let re = snap_amplitude_component(amp.re);
+        let im = snap_amplitude_component(amp.im);
+        let p = re * re + im * im;
         if p == 0.0 {
             continue;
         }
@@ -250,6 +252,25 @@ mod tests {
         assert!(sample.counts.contains_key("11"));
         assert!(!sample.counts.contains_key("01"));
         assert!(!sample.counts.contains_key("10"));
+    }
+
+    #[test]
+    fn snapped_cpu_and_gpu_statevectors_share_counts() {
+        let measures = vec![MeasureParams { qubit: 0, cbit: 0 }];
+        let gpu = vec![
+            Complex64::new(0.4999999701976776, -0.4999999701976776),
+            Complex64::new(0.4999999701976776, 0.4999999701976776),
+        ];
+        let cpu = vec![
+            Complex64::new(0.5000000000000001, -0.5000000000000001),
+            Complex64::new(0.5000000000000001, 0.5000000000000001),
+        ];
+        let gpu_probs = compute_outcome_probabilities(&gpu, 1, &measures, 1).expect("gpu");
+        let cpu_probs = compute_outcome_probabilities(&cpu, 1, &measures, 1).expect("cpu");
+        assert_eq!(gpu_probs, cpu_probs);
+        let gpu_counts = sample_counts_from_probabilities(&gpu_probs, 256, 99);
+        let cpu_counts = sample_counts_from_probabilities(&cpu_probs, 256, 99);
+        assert_eq!(gpu_counts, cpu_counts);
     }
 
     #[test]

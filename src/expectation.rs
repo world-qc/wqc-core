@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{format_go_complex_result_json, ComplexResult, EngineError, MeasureParams};
+use crate::engine::{
+    format_go_complex_result_json, snap_complex_result, ComplexResult, EngineError, MeasureParams,
+};
 use crate::tn::MpsState;
 
 /// Complex coefficient for a Pauli term (matches orchestrator JSON).
@@ -181,7 +183,7 @@ pub fn compute_expectations(
     let statevector = state.contract_to_statevector()?;
     let mut values = BTreeMap::new();
     for obs in observables {
-        let value = observable_expectation(&statevector, obs)?;
+        let value = snap_complex_result(observable_expectation(&statevector, obs)?);
         values.insert(obs.id.clone(), value);
     }
     Ok(ExpectationResult { values })

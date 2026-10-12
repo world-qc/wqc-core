@@ -184,7 +184,10 @@ fn format_go_float(val: f64) -> String {
 mod tests {
     use super::*;
     use crate::engine::{Circuit, ContractionWorkspace, Gate, MeasureParams};
-    use crate::sample::compute_outcome_probabilities;
+    use crate::sample::{
+        compute_outcome_probabilities, sample_counts_from_probabilities,
+        sample_terminal_measurements,
+    };
 
     #[test]
     fn probability_json_uses_sorted_keys_and_go_float_style() {
@@ -247,8 +250,8 @@ mod tests {
         };
         let p00 = table.probabilities.get("00").copied().unwrap_or(0.0);
         let p11 = table.probabilities.get("11").copied().unwrap_or(0.0);
-        assert!((p00 - 0.5).abs() < 1e-9, "p(00)={p00}");
-        assert!((p11 - 0.5).abs() < 1e-9, "p(11)={p11}");
+        assert!((p00 - 0.5).abs() < 1e-6, "p(00)={p00}");
+        assert!((p11 - 0.5).abs() < 1e-6, "p(11)={p11}");
         assert_eq!(table.probabilities.len(), 2);
         // Digest is defined on formatted floats from simulation (may differ from hand-crafted 0.5 literals).
         let json = format_go_probability_json(&table);
@@ -336,5 +339,24 @@ mod tests {
             build_terminal_distribution_segment(workspace.register_mut(), &measures, 2, 256, 99)
                 .expect("segment");
         assert_eq!(evaluate_born_constraint_sum(&segment), 0);
+    }
+
+    #[test]
+    fn terminal_counts_match_segment_probability_table() {
+        let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+        let mut circuit = Circuit::new(1);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+        let measures = vec![MeasureParams { qubit: 0, cbit: 0 }];
+        let sample = sample_terminal_measurements(workspace.register_mut(), &measures, 1, 256, 99)
+            .expect("sample");
+        let segment =
+            build_terminal_distribution_segment(workspace.register_mut(), &measures, 1, 256, 99)
+                .expect("segment");
+        let probabilities: BTreeMap<String, f64> = segment.probabilities.into_iter().collect();
+        let replay = sample_counts_from_probabilities(&probabilities, 256, 99);
+        assert_eq!(sample.counts, replay.counts);
     }
 }

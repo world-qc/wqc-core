@@ -6,8 +6,8 @@ use crate::distribution_proof::{
     distribution_stark_status_born_air_zk_composed, distribution_stark_status_bound,
 };
 use crate::engine::{
-    calculate_complex_result_hash, ComplexResult, ContractionWorkspace, SliceAssignment,
-    TensorNetwork,
+    calculate_complex_result_hash, snap_complex_result, ComplexResult, ContractionWorkspace,
+    SliceAssignment, TensorNetwork,
 };
 use crate::expectation::{
     calculate_expectation_result_hash, compute_expectations, validate_expectation_task,
@@ -289,6 +289,7 @@ pub async fn handle_compute(
     let (complex_result, execution_trace) = network
         .contract(&mut workspace)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let complex_result = snap_complex_result(complex_result);
 
     let (sample_result, mid_circuit_trace) = if task.output_mode == OutputMode::SampleCounts {
         let classical_bit_count = task.classical_bit_count.unwrap_or(0);
