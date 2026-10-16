@@ -60,6 +60,129 @@ mod tests {
         assert!(contract_slice(3, &gates, &assignments, 3, &mut bad).is_err());
     }
 
+    /// Wall clock of one χ=128 contraction. Not a pass/fail speed gate.
+    ///
+    /// ```text
+    /// cargo test --release --features webgpu bond128_contraction_wall_time -- --ignored --nocapture
+    /// WQC_TN_BACKEND=webgpu cargo test --release --features webgpu bond128_contraction_wall_time -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual CPU vs WebGPU wall clock"]
+    fn bond128_contraction_wall_time() {
+        // n>16 skips the dense statevector sample inside the trace. At n<=16 that
+        // sample dominates once χ grows, and it is identical on both backends.
+        let n = 20usize;
+        let chi = 128usize;
+        let layers = 8usize;
+        let gates = brickwork(n, layers);
+        let two_q = gates.iter().filter(|g| matches!(g, Gate::CNOT(..))).count();
+        eprintln!(
+            "circuit qubits={n} chi={chi} layers={layers} gates={} two_qubit={two_q}",
+            gates.len()
+        );
+        let mut kept = Vec::new();
+        for pass in 0..3 {
+            #[cfg(feature = "webgpu")]
+            {
+                crate::tn::mps::GPU_TWO_Q_ACCEPTS.store(0, std::sync::atomic::Ordering::Relaxed);
+                crate::tn::mps::GPU_TWO_Q_FALLBACKS.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            let mut state = MpsState::try_new_with_bond(n, chi).expect("mps");
+            let start = std::time::Instant::now();
+            let (result, trace) = contract_slice(n, &gates, &[], n, &mut state).expect("contract");
+            let ms = start.elapsed().as_millis();
+            let max_bond = state
+                .sites
+                .iter()
+                .map(|site| site.dim().2)
+                .max()
+                .unwrap_or(0);
+            let snapped = crate::engine::snap_complex_result(result);
+            #[cfg(feature = "webgpu")]
+            let (accepts, fallbacks) = (
+                crate::tn::mps::GPU_TWO_Q_ACCEPTS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::tn::mps::GPU_TWO_Q_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            #[cfg(not(feature = "webgpu"))]
+            let (accepts, fallbacks) = (0u64, 0u64);
+            eprintln!(
+                "pass={pass} backend={} wall_ms={ms} max_bond={max_bond} trace_f64s={} amp=({}, {}) snap_key=({}, {}) gpu_accepts={accepts} gpu_fallbacks={fallbacks} vram_bytes={}",
+                state.backend_label(),
+                trace.len(),
+                snapped.real,
+                snapped.imag,
+                (snapped.real / 1e-6).round() as i64,
+                (snapped.imag / 1e-6).round() as i64,
+                state.peak_vram_bytes(),
+            );
+            if pass > 0 {
+                kept.push(ms);
+            }
+        }
+        kept.sort();
+        eprintln!("measured_ms={kept:?} median_ms={}", kept[kept.len() / 2]);
+    }
+
+    /// Same 20q / χ=128 brickwork on CPU f64 and on a webgpu device that only
+    /// sends merges at or above the side threshold to the GPU.
+    #[test]
+    #[ignore = "20q chi=128 CPU vs GPU-merge snap"]
+    fn bond128_gpu_merge_matches_cpu_snap() {
+        #[cfg(feature = "webgpu")]
+        {
+            let Some(gpu) = crate::tn::gpu::GpuMpsDevice::try_new() else {
+                eprintln!("skip bond128_gpu_merge_matches_cpu_snap: no WebGPU adapter");
+                return;
+            };
+            let n = 20usize;
+            let chi = 128usize;
+            let gates = brickwork(n, 8);
+            let mut cpu = MpsState::try_new_with_bond(n, chi).expect("cpu");
+            let mut acc = MpsState::try_new_with_gpu(n, chi, gpu).expect("gpu");
+            let cpu_start = std::time::Instant::now();
+            let (cpu_amp, _) = contract_slice(n, &gates, &[], n, &mut cpu).expect("cpu");
+            let cpu_ms = cpu_start.elapsed().as_millis();
+            let start = std::time::Instant::now();
+            let (gpu_amp, _) = contract_slice(n, &gates, &[], n, &mut acc).expect("gpu");
+            let gpu_ms = start.elapsed().as_millis();
+            let cpu_key = (
+                (cpu_amp.real / 1e-6).round() as i64,
+                (cpu_amp.imag / 1e-6).round() as i64,
+            );
+            let gpu_key = (
+                (gpu_amp.real / 1e-6).round() as i64,
+                (gpu_amp.imag / 1e-6).round() as i64,
+            );
+            eprintln!(
+                "snap cpu={cpu_key:?} gpu={gpu_key:?} backend={} cpu_ms={cpu_ms} gpu_ms={gpu_ms} max_bond={}",
+                acc.backend_label(),
+                acc.sites.iter().map(|site| site.dim().2).max().unwrap_or(0),
+            );
+            assert_eq!(cpu_key, gpu_key);
+            assert_eq!(acc.backend_label(), "webgpu");
+        }
+        #[cfg(not(feature = "webgpu"))]
+        {
+            eprintln!("skip bond128_gpu_merge_matches_cpu_snap: webgpu feature off");
+        }
+    }
+
+    fn brickwork(n: usize, layers: usize) -> Vec<Gate> {
+        let mut gates = Vec::new();
+        for layer in 0..layers {
+            for q in 0..n {
+                let angle = 1.1 + 0.05 * (q as f64) + 0.07 * (layer as f64);
+                gates.push(Gate::RY(q, angle));
+            }
+            let mut q = layer % 2;
+            while q + 1 < n {
+                gates.push(Gate::CNOT(q, q + 1));
+                q += 2;
+            }
+        }
+        gates
+    }
+
     #[test]
     fn truncated_bond_still_runs() {
         let gates = vec![Gate::H(0), Gate::CNOT(0, 1)];

@@ -1,7 +1,10 @@
 //! Bond-truncated matrix-product-state (MPS) tensor-network backend.
 //!
 //! Memory scales as `O(N · χ²)` with bond dimension `χ` (`WQC_MPS_MAX_BOND_DIM`, default 128).
-//! Set `WQC_TN_BACKEND=webgpu` (with `--features webgpu`) to offload 1-qubit and merge kernels.
+//! Set `WQC_TN_BACKEND=webgpu` (with `--features webgpu`) to run a 2-site merge
+//! on the GPU when that product is at least the side measured on the first
+//! webgpu start of this machine. Smaller
+//! products, 1-qubit gates, and the bond SVD stay on CPU f64.
 
 #[cfg(feature = "webgpu")]
 use std::sync::Arc;
@@ -27,8 +30,17 @@ pub struct MpsState {
     #[cfg(feature = "webgpu")]
     gpu: Option<Arc<GpuMpsDevice>>,
     #[cfg(feature = "webgpu")]
+    resident: Vec<Option<super::gpu::GpuSite>>,
+    #[cfg(feature = "webgpu")]
     using_webgpu: bool,
 }
+
+/// Two-qubit GPU splits kept during tests. Process-wide.
+#[cfg(all(test, feature = "webgpu"))]
+pub static GPU_TWO_Q_ACCEPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Two-qubit GPU splits sent back to CPU f64 during tests. Process-wide.
+#[cfg(all(test, feature = "webgpu"))]
+pub static GPU_TWO_Q_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl MpsState {
     pub fn try_new(qubit_count: usize) -> Result<Self, EngineError> {
@@ -83,6 +95,8 @@ impl MpsState {
             #[cfg(feature = "webgpu")]
             gpu: shared_gpu_device(),
             #[cfg(feature = "webgpu")]
+            resident: Vec::new(),
+            #[cfg(feature = "webgpu")]
             using_webgpu: false,
         })
     }
@@ -130,6 +144,47 @@ impl MpsState {
     #[cfg(feature = "webgpu")]
     fn mark_webgpu_used(&mut self) {
         self.using_webgpu = true;
+    }
+
+    /// Test hook: force this state onto a caller-owned device.
+    #[cfg(all(test, feature = "webgpu"))]
+    pub fn try_new_with_gpu(
+        qubit_count: usize,
+        max_bond_dim: usize,
+        gpu: Arc<GpuMpsDevice>,
+    ) -> Result<Self, EngineError> {
+        let mut state = Self::try_new_with_bond(qubit_count, max_bond_dim)?;
+        state.gpu = Some(gpu);
+        state.resident.clear();
+        Ok(state)
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn ensure_resident(&mut self) -> bool {
+        let Some(gpu) = self.gpu.clone() else {
+            return false;
+        };
+        if self.resident.len() == self.sites.len() && self.resident.iter().all(|s| s.is_some()) {
+            return true;
+        }
+        self.resident = self
+            .sites
+            .iter()
+            .map(|site| Some(gpu.upload_site(site)))
+            .collect();
+        true
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn refresh_resident_pair(&mut self, p: usize, q: usize) {
+        let Some(gpu) = self.gpu.clone() else {
+            return;
+        };
+        if self.resident.len() != self.sites.len() {
+            return;
+        }
+        self.resident[p] = Some(gpu.upload_site(&self.sites[p]));
+        self.resident[q] = Some(gpu.upload_site(&self.sites[q]));
     }
 
     /// Contract the MPS to a dense statevector (Phase A sampling; `n ≤ 20`).
@@ -219,12 +274,8 @@ impl MpsState {
 
     fn apply_one_qubit(&mut self, qubit: usize, u: &[[Complex64; 2]; 2]) {
         #[cfg(feature = "webgpu")]
-        if let Some(ref gpu) = self.gpu {
-            let site = &mut self.sites[qubit];
-            if gpu.apply_one_qubit(site, u).is_ok() {
-                self.mark_webgpu_used();
-                return;
-            }
+        if self.gpu_one_qubit(qubit, u) {
+            return;
         }
 
         let site = &mut self.sites[qubit];
@@ -264,6 +315,10 @@ impl MpsState {
         ctrl_is_first: bool,
     ) -> Result<(), EngineError> {
         debug_assert_eq!(q, p + 1);
+        #[cfg(feature = "webgpu")]
+        if self.try_gpu_two_qubit(p, q, u, ctrl_is_first)? {
+            return Ok(());
+        }
         let left = self.sites[p].clone();
         let right = self.sites[q].clone();
         let dl = left.dim().0;
@@ -300,7 +355,62 @@ impl MpsState {
         let (site_l, site_r) = svd_split_two_site(updated, self.max_bond_dim)?;
         self.sites[p] = site_l;
         self.sites[q] = site_r;
+        #[cfg(feature = "webgpu")]
+        self.refresh_resident_pair(p, q);
         Ok(())
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn gpu_one_qubit(&mut self, qubit: usize, u: &[[Complex64; 2]; 2]) -> bool {
+        let _ = (qubit, u);
+        // A 1-qubit apply is a 2×2. That is below the GEMM side threshold, so
+        // the f64 loop runs even when the backend setting is webgpu.
+        false
+    }
+
+    #[cfg(feature = "webgpu")]
+    fn try_gpu_two_qubit(
+        &mut self,
+        p: usize,
+        q: usize,
+        u: &Mat4,
+        ctrl_is_first: bool,
+    ) -> Result<bool, EngineError> {
+        let rows = self.sites[p].dim().0.saturating_mul(2);
+        let cols = self.sites[q].dim().2.saturating_mul(2);
+        if !super::gpu::svd_uses_gpu(rows.max(cols)) {
+            return Ok(false);
+        }
+        let Some(gpu) = self.gpu.clone() else {
+            return Ok(false);
+        };
+        if !self.ensure_resident() {
+            return Ok(false);
+        }
+        let outcome = {
+            let (Some(left), Some(right)) = (self.resident[p].as_ref(), self.resident[q].as_ref())
+            else {
+                return Ok(false);
+            };
+            gpu.split_two_qubit(left, right, u, ctrl_is_first, self.max_bond_dim)?
+        };
+        match outcome {
+            super::gpu::SplitOutcome::Accepted(got) => {
+                self.sites[p] = got.left;
+                self.sites[q] = got.right;
+                self.resident[p] = Some(gpu.upload_site(&self.sites[p]));
+                self.resident[q] = Some(gpu.upload_site(&self.sites[q]));
+                self.mark_webgpu_used();
+                #[cfg(test)]
+                GPU_TWO_Q_ACCEPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(true)
+            }
+            super::gpu::SplitOutcome::Fallback => {
+                #[cfg(test)]
+                GPU_TWO_Q_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(false)
+            }
+        }
     }
 
     fn merge_two_site_tensors(
@@ -309,13 +419,12 @@ impl MpsState {
         right: &Array3<Complex64>,
     ) -> Result<Array4<Complex64>, EngineError> {
         #[cfg(feature = "webgpu")]
-        if let Some(ref gpu) = self.gpu {
-            if let Ok(theta) = gpu.merge_two_site(left, right) {
+        if let Some(gpu) = self.gpu.clone() {
+            if let Some(theta) = gpu.try_gpu_merge(left, right) {
                 self.mark_webgpu_used();
                 return Ok(theta);
             }
         }
-
         let dl = left.dim().0;
         let dr = right.dim().2;
         let bond = left.dim().2.min(right.dim().0);
@@ -469,8 +578,8 @@ fn truncated_svd_split(
     let cols = mat.ncols();
     let svd = mat.svd(true, true);
     let singular = svd.singular_values;
-    let rank = singular.iter().filter(|&&s| s > 1e-12).count().max(1);
-    let chi = rank.min(max_bond).min(rows).min(cols);
+    let values: Vec<f64> = singular.iter().copied().collect();
+    let chi = super::svd_guard::retained_chi(&values, max_bond, rows, cols);
 
     let u = svd
         .u
