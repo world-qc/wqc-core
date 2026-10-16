@@ -1,12 +1,12 @@
-// Tiled complex f32 matrix product.
-// C[m, n] = A[m, k] * B[k, n]. Dimensions need not be multiples of 16.
-// vec2f = (re, im). One workgroup writes a 16×16 tile of C.
+// Tiled complex f32 matrix product, with an independent batch.
+// C[b, m, n] = A[b, m, k] * B[b, k, n]. Dimensions need not be multiples of 16.
+// vec2f = (re, im). One workgroup writes a 16×16 tile of one batch item.
 
 struct GemmParams {
     m: u32,
     k: u32,
     n: u32,
-    _pad: u32,
+    batch: u32,
 }
 
 @group(0) @binding(0) var<uniform> gemm_params: GemmParams;
@@ -22,6 +22,13 @@ fn gemm_f32(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
     let m = gemm_params.m;
     let kdim = gemm_params.k;
     let n = gemm_params.n;
+    let batch = wg.z;
+    if (batch >= gemm_params.batch) {
+        return;
+    }
+    let a_off = batch * m * kdim;
+    let b_off = batch * kdim * n;
+    let c_off = batch * m * n;
     let row = wg.y * 16u + lid.y;
     let col = wg.x * 16u + lid.x;
     var acc = vec2f(0.0, 0.0);
@@ -32,10 +39,10 @@ fn gemm_f32(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
         var a_val = vec2f(0.0, 0.0);
         var b_val = vec2f(0.0, 0.0);
         if (row < m && a_col < kdim) {
-            a_val = gemm_a[row * kdim + a_col];
+            a_val = gemm_a[a_off + row * kdim + a_col];
         }
         if (b_row < kdim && col < n) {
-            b_val = gemm_b[b_row * n + col];
+            b_val = gemm_b[b_off + b_row * n + col];
         }
         tile_a[lid.y * 16u + lid.x] = a_val;
         tile_b[lid.y * 16u + lid.x] = b_val;
@@ -51,6 +58,6 @@ fn gemm_f32(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
         workgroupBarrier();
     }
     if (row < m && col < n) {
-        gemm_c[row * n + col] = acc;
+        gemm_c[c_off + row * n + col] = acc;
     }
 }

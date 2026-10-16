@@ -154,9 +154,11 @@ mod tests {
                 (gpu_amp.imag / 1e-6).round() as i64,
             );
             eprintln!(
-                "snap cpu={cpu_key:?} gpu={gpu_key:?} backend={} cpu_ms={cpu_ms} gpu_ms={gpu_ms} max_bond={}",
+                "snap cpu={cpu_key:?} gpu={gpu_key:?} backend={} cpu_ms={cpu_ms} gpu_ms={gpu_ms} max_bond={} rsvd_kept={} rsvd_fallback={}",
                 acc.backend_label(),
                 acc.sites.iter().map(|site| site.dim().2).max().unwrap_or(0),
+                crate::tn::mps::RSVD_KEPT.load(std::sync::atomic::Ordering::Relaxed),
+                crate::tn::mps::RSVD_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
             );
             assert_eq!(cpu_key, gpu_key);
             assert_eq!(acc.backend_label(), "webgpu");
