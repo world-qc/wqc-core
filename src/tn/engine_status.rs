@@ -64,7 +64,8 @@ fn probe_tn_engine_status() -> TnEngineStatus {
 
     #[cfg(feature = "webgpu")]
     {
-        if shared_gpu_device().is_some() {
+        if let Some(gpu) = shared_gpu_device() {
+            super::gpu::calibrate_gemm_side(&gpu);
             TnEngineStatus {
                 requested,
                 active: "webgpu".to_string(),

@@ -38,12 +38,12 @@ Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense
 
 Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgpu`.
 
-| Component | GPU | CPU fallback |
-|-----------|-----|----------------|
-| 1-qubit site apply | `apply_one_qubit` compute shader | native loops |
-| 2-site merge (θ tensor) | `merge_two_site` compute shader | native loops |
-| 2-qubit unitary on θ | — | native (f64) |
-| SVD bond truncation | — | `nalgebra` (f64) |
+| Component | GPU | CPU |
+|-----------|-----|-----|
+| 1-qubit site apply | — | always. A 2×2 is below the merge side threshold, even when `WQC_TN_BACKEND=webgpu` |
+| 2-site merge (θ tensor) | tiled f32 GEMM (`gemm.wgsl`) when the multiply count reaches the side measured on the first webgpu start | native f64 below that side |
+| 2-qubit unitary on θ | — | native f64. The split stays on CPU, so the unitary stays with it |
+| SVD bond truncation | fused Jacobi is tested through side 256 | `nalgebra` f64 for every production split. The fused kernel was slower at sides 8…256 |
 
 `WorkReport` includes `tn_backend` (`cpu` / `webgpu`) and `vram_peak_bytes` (peak GPU buffer allocation per task).
 
@@ -52,7 +52,7 @@ Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgp
 **proxy**, not free VRAM. `wqc-node` may take `min(RAM budget, VRAM budget)` for bidding;
 PCS gates still use system RAM / `WQC_MAX_MEMORY_GB` only.
 
-Shaders: `src/tn/gpu/shaders.wgsl`. Complex numbers use `vec2<f32>` on GPU; results are promoted to `f64` before SVD and trace emission.
+Shaders: `src/tn/gpu/gemm.wgsl` (tiled complex f32, `vec2f`) is the merge used at or above the measured side. `src/tn/gpu/svd.wgsl` (double-float, `vec4f`) holds the Jacobi kernel used by the conformance test, not by production splits. The side is the square matrix with the same multiply count as that one product, not the qubit count. The first `WQC_TN_BACKEND=webgpu` start times CPU f64 against a GPU upload/multiply/readback (up to 2 min) and caches the side (`WQC_GEMM_SIDE_PATH`, or `~/Library/Caches/wqc/gemm-min-side` on macOS). Later starts read that file. `WQC_GEMM_MIN_SIDE` skips the measurement. Until a measurement exists the process uses side 160. On one Mac the measured crossover was side 160. The same 20q / χ=128 circuit still snaps to `(16861, 0)` and stays about 370 ms, because the SVD remains on CPU. `src/tn/gpu/shaders.wgsl` still has the older `vec2<f32>` 1-qubit and merge kernels. Nodes do not re-check the CPU SVD at runtime; agreement is the offline conformance test (`gpu_svd_matches_f64_on_separated_spectra`, χ = 2, 16, 32, 128).
 
 ## Execution flow
 

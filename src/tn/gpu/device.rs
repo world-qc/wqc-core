@@ -8,8 +8,13 @@ use ndarray::{Array3, Array4};
 use num_complex::Complex64;
 use wgpu::util::DeviceExt;
 
+use std::sync::OnceLock;
+
 use crate::engine::EngineError;
 use crate::tn::gates::Mat2;
+
+use super::gemm::GemmKernels;
+use super::split::SvdKernels;
 
 const SHADER_SRC: &str = include_str!("shaders.wgsl");
 
@@ -53,6 +58,9 @@ pub struct GpuMpsDevice {
     vram_budget_bytes: u64,
     one_qubit_layout: wgpu::BindGroupLayout,
     merge_layout: wgpu::BindGroupLayout,
+    svd: OnceLock<SvdKernels>,
+    gemm: OnceLock<GemmKernels>,
+    adapter_label: String,
 }
 
 impl GpuMpsDevice {
@@ -69,6 +77,8 @@ impl GpuMpsDevice {
         }))?;
 
         let vram_budget_bytes = adapter.limits().max_buffer_size;
+        let info = adapter.get_info();
+        let adapter_label = format!("{} [{:?}]", info.name, info.backend);
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -197,7 +207,14 @@ impl GpuMpsDevice {
             vram_budget_bytes,
             one_qubit_layout,
             merge_layout,
+            svd: OnceLock::new(),
+            gemm: OnceLock::new(),
+            adapter_label,
         }))
+    }
+
+    pub(crate) fn adapter_label(&self) -> &str {
+        &self.adapter_label
     }
 
     pub fn peak_vram_bytes(&self) -> u64 {
@@ -209,7 +226,23 @@ impl GpuMpsDevice {
         self.vram_budget_bytes
     }
 
-    fn track_allocation(&self, bytes: u64) {
+    pub(super) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub(super) fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub(super) fn svd_kernels(&self) -> &SvdKernels {
+        self.svd.get_or_init(|| SvdKernels::new(&self.device))
+    }
+
+    pub(super) fn gemm_kernels(&self) -> &GemmKernels {
+        self.gemm.get_or_init(|| GemmKernels::new(&self.device))
+    }
+
+    pub(super) fn track_allocation(&self, bytes: u64) {
         let mut current = self.peak_bytes.load(Ordering::Relaxed);
         while bytes > current {
             match self.peak_bytes.compare_exchange_weak(

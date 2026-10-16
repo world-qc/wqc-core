@@ -125,6 +125,9 @@ async fn main() {
 }
 
 fn print_core_banner(mode: &str, addr: &str) {
+    // Probing may measure the GPU merge side for up to two minutes on the
+    // first webgpu start. Do that before announcing that the core is ready.
+    let tn = crate::tn::tn_engine_status();
     println!(
         "{}",
         "============================================================".bright_blue()
@@ -170,7 +173,6 @@ fn print_core_banner(mode: &str, addr: &str) {
         }
     }
 
-    let tn = crate::tn::tn_engine_status();
     let engine_line = if tn.requested == tn.active {
         match tn.active.as_str() {
             "webgpu" => "WEBGPU MPS".bright_magenta().bold().to_string(),
@@ -193,6 +195,23 @@ fn print_core_banner(mode: &str, addr: &str) {
     );
     if let Some(note) = &tn.note {
         println!("    {:8} {}", "↳".dimmed(), note.italic().bright_black());
+    }
+    #[cfg(feature = "webgpu")]
+    if tn.active == "webgpu" {
+        let side = crate::tn::gpu::gemm_min_side();
+        if side > 4096 {
+            println!(
+                "  📐 {:8} {}",
+                "GEMM".bold(),
+                "CPU (this GPU stayed slower)".bright_cyan()
+            );
+        } else {
+            println!(
+                "  📐 {:8} {}",
+                "GEMM".bold(),
+                format!("GPU when side ≥ {side}").bright_magenta()
+            );
+        }
     }
     println!();
 }
