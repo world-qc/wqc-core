@@ -44,7 +44,20 @@ fn merge_uses_gpu_at(m: usize, k: usize, n: usize, min_side: usize) -> bool {
 
 /// True when this process's measured side says the product should run on the GPU.
 pub(crate) fn use_gpu_gemm(m: usize, k: usize, n: usize) -> bool {
-    merge_uses_gpu_at(m, k, n, gemm_min_side())
+    use_gpu_gemm_batch(1, m, k, n)
+}
+
+/// Same rule as [`use_gpu_gemm`], counting every item of a batched product.
+pub(crate) fn use_gpu_gemm_batch(batch: usize, m: usize, k: usize, n: usize) -> bool {
+    if batch == 0 {
+        return false;
+    }
+    let flops = (batch as u128)
+        .saturating_mul(m as u128)
+        .saturating_mul(k as u128)
+        .saturating_mul(n as u128);
+    let side = gemm_min_side() as u128;
+    m != 0 && k != 0 && n != 0 && flops >= side.saturating_mul(side).saturating_mul(side)
 }
 
 /// Smallest measured side where the GPU round trip was faster, if any sample won.
@@ -62,7 +75,7 @@ struct GemmParams {
     m: u32,
     k: u32,
     n: u32,
-    _pad: u32,
+    batch: u32,
 }
 
 pub(super) struct GemmKernels {
@@ -193,7 +206,7 @@ impl GpuGemm {
         a: &[[f32; 2]],
         b: &[[f32; 2]],
     ) -> ResidentGemm<'_> {
-        let (c_buf, keep) = upload_gemm(&self.device, &self.kernels, m, k, n, a, b);
+        let (c_buf, keep) = upload_gemm(&self.device, &self.kernels, (1, m, k, n), a, b);
         ResidentGemm {
             gpu: self,
             m,
@@ -240,20 +253,19 @@ impl ResidentGemm<'_> {
 fn upload_gemm(
     gpu: &GpuMpsDevice,
     kernels: &GemmKernels,
-    m: usize,
-    k: usize,
-    n: usize,
+    dims: (usize, usize, usize, usize),
     a: &[[f32; 2]],
     b: &[[f32; 2]],
 ) -> (
     wgpu::Buffer,
     (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup),
 ) {
+    let (batch, m, k, n) = dims;
     let a_buf = storage_buf(gpu, "gemm-a", bytemuck::cast_slice(a));
     let b_buf = storage_buf(gpu, "gemm-b", bytemuck::cast_slice(b));
     let c_buf = gpu.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("gemm-c"),
-        size: (m * n * std::mem::size_of::<[f32; 2]>()) as u64,
+        size: (batch.max(1) * m * n * std::mem::size_of::<[f32; 2]>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -261,7 +273,7 @@ fn upload_gemm(
         m: m as u32,
         k: k as u32,
         n: n as u32,
-        _pad: 0,
+        batch: batch.max(1) as u32,
     };
     let params_buf = gpu
         .device()
@@ -319,7 +331,7 @@ impl GpuMpsDevice {
             }
         }
         let kernels = self.gemm_kernels();
-        let (c_buf, keep) = upload_gemm(self, kernels, m, bond, n, &a, &b);
+        let (c_buf, keep) = upload_gemm(self, kernels, (1, m, bond, n), &a, &b);
         let groups_x = (n as u32).div_ceil(16);
         let groups_y = (m as u32).div_ceil(16);
         let mut encoder = self
@@ -352,6 +364,38 @@ impl GpuMpsDevice {
             }
         }
         Some(theta)
+    }
+
+    /// One dispatch of `batch` independent products. `None` when this machine's
+    /// side says the CPU product is faster. `A` stays on the device for that
+    /// single multiply; the caller keeps the result.
+    pub(crate) fn try_complex_gemm(
+        &self,
+        batch: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+        a: &[Complex64],
+        b: &[Complex64],
+    ) -> Option<Vec<Complex64>> {
+        if !use_gpu_gemm_batch(batch, m, k, n) {
+            return None;
+        }
+        if a.len() != batch * m * k || b.len() != batch * k * n {
+            return None;
+        }
+        let af: Vec<[f32; 2]> = a.iter().map(|z| [z.re as f32, z.im as f32]).collect();
+        let bf: Vec<[f32; 2]> = b.iter().map(|z| [z.re as f32, z.im as f32]).collect();
+        let kernels = self.gemm_kernels();
+        let (c_buf, keep) = upload_gemm(self, kernels, (batch, m, k, n), &af, &bf);
+        dispatch_uploaded(self, kernels, m, n, batch, &keep.3);
+        let flat = read_complex(self, &c_buf, batch * m * n);
+        drop(keep);
+        Some(
+            flat.into_iter()
+                .map(|z| Complex64::new(f64::from(z[0]), f64::from(z[1])))
+                .collect(),
+        )
     }
 }
 
@@ -551,15 +595,15 @@ fn measure_square(gpu: &GpuMpsDevice, n: usize) -> (u128, u128) {
         cpu.push(start.elapsed().as_micros());
     }
     let kernels = gpu.gemm_kernels();
-    let warmup = upload_gemm(gpu, kernels, n, n, n, &a, &b);
-    dispatch_uploaded(gpu, kernels, n, n, &warmup.1 .3);
+    let warmup = upload_gemm(gpu, kernels, (1, n, n, n), &a, &b);
+    dispatch_uploaded(gpu, kernels, n, n, 1, &warmup.1 .3);
     let _ = read_complex(gpu, &warmup.0, n * n);
     drop(warmup);
     let mut gpu_us = Vec::with_capacity(reps);
     for _ in 0..reps {
         let start = std::time::Instant::now();
-        let uploaded = upload_gemm(gpu, kernels, n, n, n, &a, &b);
-        dispatch_uploaded(gpu, kernels, n, n, &uploaded.1 .3);
+        let uploaded = upload_gemm(gpu, kernels, (1, n, n, n), &a, &b);
+        dispatch_uploaded(gpu, kernels, n, n, 1, &uploaded.1 .3);
         let corner = read_complex(gpu, &uploaded.0, n * n);
         std::hint::black_box(corner.first().copied());
         drop(uploaded);
@@ -573,10 +617,12 @@ fn dispatch_uploaded(
     kernels: &GemmKernels,
     m: usize,
     n: usize,
+    batch: usize,
     bind: &wgpu::BindGroup,
 ) {
     let groups_x = (n as u32).div_ceil(16);
     let groups_y = (m as u32).div_ceil(16);
+    let groups_z = batch.max(1) as u32;
     let mut encoder = gpu
         .device()
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -589,7 +635,7 @@ fn dispatch_uploaded(
         });
         pass.set_pipeline(&kernels.pipeline);
         pass.set_bind_group(0, bind, &[]);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
+        pass.dispatch_workgroups(groups_x, groups_y, groups_z);
     }
     gpu.queue().submit(Some(encoder.finish()));
     gpu.device().poll(wgpu::Maintain::Wait);

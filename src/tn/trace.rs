@@ -78,6 +78,21 @@ pub fn execute_with_trace(
             continue;
         }
 
+        // n≤16 samples a dense slice whose index includes every other qubit, so
+        // a disjoint gate still moves which slice is chosen. Above that, the
+        // pre-amp is a bond contraction and a disjoint unitary leaves it put,
+        // so the whole layer is read once and applied as one product.
+        let layer = if state.qubit_count > 16 {
+            adjacent_disjoint_len(&gates[i..])
+        } else {
+            0
+        };
+        if layer >= 2 {
+            emit_disjoint_layer(state, &gates[i..i + layer], &mut trace, &mut air_amps)?;
+            i += layer;
+            continue;
+        }
+
         emit_gate_trace(state, gate.clone(), &mut trace, &mut air_amps)?;
         i += 1;
     }
@@ -135,6 +150,93 @@ fn consecutive_rotation_run(gates: &[Gate]) -> Option<(usize, f64)> {
         }
     }
     Some((run, angle_sum))
+}
+
+fn adjacent_pair(gate: &Gate) -> Option<(usize, usize)> {
+    let (c, t) = match gate {
+        Gate::CNOT(c, t) | Gate::CZ(c, t) => (*c, *t),
+        _ => return None,
+    };
+    if c.abs_diff(t) != 1 {
+        return None;
+    }
+    Some((c.min(t), c.max(t)))
+}
+
+fn adjacent_disjoint_len(gates: &[Gate]) -> usize {
+    let mut seen = Vec::new();
+    let mut n = 0usize;
+    for gate in gates {
+        let Some((lo, hi)) = adjacent_pair(gate) else {
+            break;
+        };
+        if seen.contains(&lo) || seen.contains(&hi) {
+            break;
+        }
+        seen.push(lo);
+        seen.push(hi);
+        n += 1;
+    }
+    if n >= 2 {
+        n
+    } else {
+        0
+    }
+}
+
+fn emit_disjoint_layer(
+    state: &mut MpsState,
+    gates: &[Gate],
+    trace: &mut Vec<f64>,
+    air_amps: &mut HashMap<usize, AirAmpState>,
+) -> Result<(), EngineError> {
+    let mut pres = Vec::with_capacity(gates.len());
+    for gate in gates {
+        let logical_target = gate_logical_target(gate);
+        let (pre, ctrl_active, ctrl_active_2, p_cos, p_sin) =
+            resolve_pre_amps(state, gate, logical_target, air_amps);
+        push_trace_row(
+            trace,
+            gate.to_stark_id().unwrap_or(0.0),
+            ctrl_active,
+            ctrl_active_2,
+            p_cos,
+            p_sin,
+            pre.v0_re,
+            pre.v0_im,
+            pre.v1_re,
+            pre.v1_im,
+            logical_target as f64,
+        );
+        pres.push((
+            gate.clone(),
+            logical_target,
+            pre,
+            ctrl_active,
+            ctrl_active_2,
+            p_cos,
+            p_sin,
+        ));
+    }
+    state.apply_adjacent_disjoint_gates(gates)?;
+    for (gate, logical_target, pre, ctrl_active, ctrl_active_2, p_cos, p_sin) in pres {
+        let post = air_exact_post_amps(&gate, &pre, ctrl_active, ctrl_active_2, p_cos, p_sin);
+        push_trace_row(
+            trace,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            post.v0_re,
+            post.v0_im,
+            post.v1_re,
+            post.v1_im,
+            logical_target as f64,
+        );
+        air_amps.insert(logical_target, post);
+    }
+    Ok(())
 }
 
 fn is_identity_rotation(angle_sum: f64) -> bool {

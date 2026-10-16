@@ -41,9 +41,9 @@ Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgp
 | Component | GPU | CPU |
 |-----------|-----|-----|
 | 1-qubit site apply | — | always. A 2×2 is below the merge side threshold, even when `WQC_TN_BACKEND=webgpu` |
-| 2-site merge (θ tensor) | tiled f32 GEMM (`gemm.wgsl`) when the multiply count reaches the side measured on the first webgpu start | native f64 below that side |
-| 2-qubit unitary on θ | — | native f64. The split stays on CPU, so the unitary stays with it |
-| SVD bond truncation | fused Jacobi is tested through side 256 | `nalgebra` f64 for every production split. The fused kernel was slower at sides 8…256 |
+| 2-site merge (θ tensor) | tiled f32 GEMM (`gemm.wgsl`), including one batched product for a layer of disjoint adjacent CNOT/CZ | native f64 below the measured side |
+| 2-qubit unitary on θ | — | native f64 |
+| Bond truncation | the matmuls of a randomized SVD, f32, when that product is at least the measured side | full `nalgebra` f64 SVD below side 160, and again when the χ cut is ambiguous. Fused Jacobi stays a conformance kernel |
 
 `WorkReport` includes `tn_backend` (`cpu` / `webgpu`) and `vram_peak_bytes` (peak GPU buffer allocation per task).
 
@@ -52,7 +52,7 @@ Build with `cargo build --features webgpu`. At runtime set `WQC_TN_BACKEND=webgp
 **proxy**, not free VRAM. `wqc-node` may take `min(RAM budget, VRAM budget)` for bidding;
 PCS gates still use system RAM / `WQC_MAX_MEMORY_GB` only.
 
-Shaders: `src/tn/gpu/gemm.wgsl` (tiled complex f32, `vec2f`) is the merge used at or above the measured side. `src/tn/gpu/svd.wgsl` (double-float, `vec4f`) holds the Jacobi kernel used by the conformance test, not by production splits. The side is the square matrix with the same multiply count as that one product, not the qubit count. The first `WQC_TN_BACKEND=webgpu` start times CPU f64 against a GPU upload/multiply/readback (up to 2 min) and caches the side (`WQC_GEMM_SIDE_PATH`, or `~/Library/Caches/wqc/gemm-min-side` on macOS). Later starts read that file. `WQC_GEMM_MIN_SIDE` skips the measurement. Until a measurement exists the process uses side 160. On one Mac the measured crossover was side 160. The same 20q / χ=128 circuit still snaps to `(16861, 0)` and stays about 370 ms, because the SVD remains on CPU. `src/tn/gpu/shaders.wgsl` still has the older `vec2<f32>` 1-qubit and merge kernels. Nodes do not re-check the CPU SVD at runtime; agreement is the offline conformance test (`gpu_svd_matches_f64_on_separated_spectra`, χ = 2, 16, 32, 128).
+Shaders: `src/tn/gpu/gemm.wgsl` (tiled complex f32, `vec2f`, independent batch) is the merge and the randomized-SVD matmul used at or above the measured side. `src/tn/gpu/svd.wgsl` (double-float, `vec4f`) holds the Jacobi kernel used by the conformance test, not by production splits. The side is the square matrix with the same multiply count as that one product, not the qubit count. CPU and GPU nodes both switch from a full SVD to the randomized SVD at side 160, so the algorithm does not depend on which machine measured the GEMM side. The GPU only replaces the matmul. A cut near `1e-12` or a flat χ boundary falls back to the f64 SVD. The first `WQC_TN_BACKEND=webgpu` start times CPU f64 against a GPU upload/multiply/readback (up to 2 min) and caches the side (`WQC_GEMM_SIDE_PATH`, or `~/Library/Caches/wqc/gemm-min-side` on macOS). Later starts read that file. `WQC_GEMM_MIN_SIDE` skips the measurement. Until a measurement exists the process uses side 160. On one Mac the measured crossover was side 160. A disjoint adjacent CNOT/CZ layer is read once, then applied as one product. The same 20q / χ=128 circuit still snaps to `(16861, 0)`. On that circuit the saturated cut is flat, so those splits fall back to the f64 SVD after the range finder; a release run was about 580 ms on CPU and 520–740 ms on the GPU path, slower than the previous full-SVD CPU baseline of about 370 ms. `src/tn/gpu/shaders.wgsl` still has the older `vec2<f32>` 1-qubit and merge kernels. Nodes do not re-check the CPU SVD at runtime; agreement is the offline snap (`bond128_gpu_merge_matches_cpu_snap`).
 
 ## Execution flow
 
@@ -62,7 +62,7 @@ POST /compute
   → TensorNetwork::contract → contract_slice()
        1. Compact-register boundary check
        2. |0…0⟩ product MPS
-       3. Per gate: pre-trace → apply gate tensor(s) → SVD truncate → post-trace
+       3. Per gate, or one disjoint adjacent layer: pre-trace → apply → truncate → post-trace
        4. Scalar = ⟨0…0|ψ⟩
   → STARK prove
 ```
@@ -72,7 +72,7 @@ POST /compute
 | Arity | Method |
 |-------|--------|
 | 1-qubit | Local tensor contraction on site `t` |
-| 2-qubit | Bubble SWAPs → adjacent pair → merge → apply `U` → SVD split (truncate to `χ`) |
+| 2-qubit | Bubble SWAPs → adjacent pair → merge → apply `U` → split (full SVD, or a GEMM range finder at side ≥ 160). A run of adjacent disjoint CNOT/CZ is one batched merge |
 | CCNOT | Standard Toffoli decomposition (H / CNOT / T / T†) using 2-site kernels only |
 
 ## Compact-register boundaries
