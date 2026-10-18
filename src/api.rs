@@ -240,6 +240,16 @@ fn apply_mps_site_order(task: &mut ComputeTask) -> Result<(), crate::engine::Eng
     Ok(())
 }
 
+/// Hash of MEASURE coordinates on the dispatched circuit, before MPS site remap.
+///
+/// Site order is only an execution layout. Born and trajectory traces stay in
+/// site coordinates, but `measurement_spec_hash` is the logical commitment the
+/// orchestrator stored when it built the subtask.
+fn committed_measurement_spec_hash(circuit: &[crate::engine::Gate]) -> String {
+    let measures = crate::mid_circuit::collect_measures(circuit);
+    crate::distribution_proof::calculate_measurement_spec_hash(&measures)
+}
+
 // --- Handlers ---
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
@@ -256,6 +266,7 @@ pub async fn handle_compute(
         task.original_qubit_count,
     );
 
+    let logical_spec_hash = committed_measurement_spec_hash(&task.circuit);
     apply_mps_site_order(&mut task).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let measures = crate::mid_circuit::collect_measures(&task.circuit);
@@ -358,7 +369,7 @@ pub async fn handle_compute(
     };
 
     let prove_start = std::time::Instant::now();
-    let distribution_segment = if task.output_mode == OutputMode::SampleCounts
+    let mut distribution_segment = if task.output_mode == OutputMode::SampleCounts
         && !uses_mid_circuit_semantics(&task.circuit)
         && task.noise_model.is_none()
     {
@@ -380,17 +391,17 @@ pub async fn handle_compute(
     } else {
         None
     };
+    if let Some(segment) = distribution_segment.as_mut() {
+        segment.measurement_spec_hash = logical_spec_hash.clone();
+    }
 
     let trajectory_segment = if let Some(trace) = mid_circuit_trace.as_ref() {
-        let measures = crate::mid_circuit::collect_measures(&task.circuit);
-        let measurement_spec_hash =
-            crate::distribution_proof::calculate_measurement_spec_hash(&measures);
         Some(build_trajectory_segment(
             trace,
             task.qubit_count as u32,
             task.sample_seed.unwrap_or(0),
             task.shots.unwrap_or(0),
-            measurement_spec_hash,
+            logical_spec_hash,
         ))
     } else {
         None
@@ -600,4 +611,30 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         pcs_memory_policy: PcsMemoryPolicy::from_env().as_str().to_string(),
         vram_budget_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::committed_measurement_spec_hash;
+    use crate::engine::{Gate, MeasureParams};
+
+    #[test]
+    fn committed_measurement_spec_hash_stays_logical_when_site_order_moves_measures() {
+        let circuit = vec![
+            Gate::CNOT(0, 2),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::MEASURE(MeasureParams { qubit: 2, cbit: 1 }),
+        ];
+        let logical = committed_measurement_spec_hash(&circuit);
+        // site_order[site] = logical. This permutation moves both measured qubits.
+        let logical_to_site = crate::tn::site_order::logical_to_site_map(&[2, 0, 1]);
+        let remapped =
+            crate::tn::site_order::remap_gates(&circuit, &logical_to_site).expect("remap gates");
+        let site = committed_measurement_spec_hash(&remapped);
+        assert_ne!(
+            logical, site,
+            "site remap changes measure qubit indices and their hash"
+        );
+        assert_eq!(committed_measurement_spec_hash(&circuit), logical);
+    }
 }
