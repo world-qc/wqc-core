@@ -45,10 +45,10 @@ pub fn execute_with_trace(
         if let Some(run) = consecutive_h_run(&gates[i..]) {
             let traced = run % 2;
             let silent = run - traced;
+            // Even run of H is identity. Keep the previous AIR snapshot so the
+            // next row stays on that fixed-point state instead of a raw resample.
             for gate in &gates[i..i + silent] {
                 state.apply_gate(gate)?;
-                // Physics advanced without AIR rows — drop carried amps for that target.
-                air_amps.remove(&gate_logical_target(gate));
             }
             if traced == 1 {
                 emit_gate_trace(state, gates[i + silent].clone(), &mut trace, &mut air_amps)?;
@@ -59,9 +59,12 @@ pub fn execute_with_trace(
 
         if let Some((run, angle_sum)) = consecutive_rotation_run(&gates[i..]) {
             if is_identity_rotation(angle_sum) {
+                // A full turn is -I: a global phase, with no AIR row of its own.
+                // The previous post row is still the right snapshot. Dropping it
+                // makes the terminal row resample the phased state and fail the
+                // identity link (air_sum = 4·scale²).
                 for gate in &gates[i..i + run] {
                     state.apply_gate(gate)?;
-                    air_amps.remove(&gate_logical_target(gate));
                 }
             } else {
                 // Emit one net-angle rotation so intermediate both-nonzero states are not
