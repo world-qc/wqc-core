@@ -628,6 +628,20 @@ mod trace_tests {
                 ],
             ),
             ("y", vec![Gate::Y(0)]),
+            ("s", vec![Gate::S(0)]),
+            ("t", vec![Gate::T(0)]),
+            ("h_t", vec![Gate::H(0), Gate::T(0)]),
+            ("h_s", vec![Gate::H(0), Gate::S(0)]),
+            ("rx_pi", vec![Gate::RX(0, std::f64::consts::PI)]),
+            (
+                "ry_3pi2",
+                vec![Gate::RY(0, 3.0 * std::f64::consts::PI / 2.0)],
+            ),
+            (
+                "rz_neg_pi2",
+                vec![Gate::RZ(0, -std::f64::consts::FRAC_PI_2)],
+            ),
+            ("rx_pi8", vec![Gate::RX(0, std::f64::consts::PI / 8.0)]),
             ("cnot_inactive", vec![Gate::CNOT(0, 1)]),
             ("h_ccnot_devnet", vec![Gate::H(0), Gate::CCNOT(0, 1, 2)]),
         ];
@@ -669,6 +683,181 @@ mod trace_tests {
                 0,
                 "{name}: executor trace should satisfy AIR constraints"
             );
+        }
+    }
+
+    /// Keepalive angles include π/2 and 3π/2. On one qubit those two rotations
+    /// are a full turn (-I). Dropping the AIR snapshot after that turn makes
+    /// the terminal row fail the identity link (`air_sum = 4·scale²`).
+    #[test]
+    fn full_turn_after_pauli_satisfies_air() {
+        use p3_field::PrimeField32;
+        use wqc_stark_engine::evaluate_execution_trace;
+
+        let half = std::f64::consts::FRAC_PI_2;
+        let three_half = 3.0 * std::f64::consts::PI / 2.0;
+        let cases = [
+            vec![Gate::Y(0), Gate::RX(0, half), Gate::RX(0, three_half)],
+            vec![Gate::Y(0), Gate::RY(0, half), Gate::RY(0, three_half)],
+            vec![Gate::X(0), Gate::RZ(0, half), Gate::RZ(0, three_half)],
+            vec![Gate::Y(0), Gate::H(0), Gate::H(0)],
+        ];
+        for gates in cases {
+            let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+            let mut circuit = Circuit::new(1);
+            for gate in &gates {
+                circuit.add(gate.clone()).expect("add");
+            }
+            let trace = circuit
+                .execute_with_trace(workspace.register_mut())
+                .expect("trace");
+            let air_sum = evaluate_execution_trace(&trace).expect("expand");
+            assert_eq!(
+                air_sum.as_canonical_u32(),
+                0,
+                "{gates:?}: air_sum={}",
+                air_sum.as_canonical_u32()
+            );
+        }
+    }
+
+    /// CZ must keep |01>. Reversed control (CZ(1, 0)) used to drop that column
+    /// and return a statevector whose norm was 1/2 or 0.
+    #[test]
+    fn cz_reversed_control_preserves_superposition() {
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        circuit.add(Gate::H(0)).expect("h");
+        circuit.add(Gate::CZ(1, 0)).expect("cz");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+        let sv = workspace
+            .register_mut()
+            .contract_to_statevector()
+            .expect("sv");
+        let norm: f64 = sv.iter().map(|a| a.norm_sqr()).sum();
+        assert!((norm - 1.0).abs() < 1e-9, "norm {norm} sv={sv:?}");
+        let inv = 1.0 / 2.0f64.sqrt();
+        assert!((sv[0].re - inv).abs() < 1e-9 && sv[0].im.abs() < 1e-9);
+        assert!((sv[1].re - inv).abs() < 1e-9 && sv[1].im.abs() < 1e-9);
+        assert!(sv[2].norm_sqr() < 1e-18 && sv[3].norm_sqr() < 1e-18);
+    }
+
+    /// CNOT(1, 0), CZ(0, 1), RX(0, π/2), CZ(1, 0). The last CZ has reversed
+    /// control. The old tensor zeroed |01|, so this slice finished at norm 1/2
+    /// while `air_sum` stayed 0.
+    #[test]
+    fn reversed_cz_after_rx_keeps_norm_and_air() {
+        use p3_field::PrimeField32;
+        use wqc_stark_engine::evaluate_execution_trace;
+
+        let gates = [
+            Gate::CNOT(1, 0),
+            Gate::CZ(0, 1),
+            Gate::RX(0, std::f64::consts::FRAC_PI_2),
+            Gate::CZ(1, 0),
+        ];
+        let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+        let mut circuit = Circuit::new(2);
+        for gate in &gates {
+            circuit.add(gate.clone()).expect("add");
+        }
+        let trace = circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("trace");
+        let air_sum = evaluate_execution_trace(&trace).expect("expand");
+        assert_eq!(
+            air_sum.as_canonical_u32(),
+            0,
+            "air_sum={}",
+            air_sum.as_canonical_u32()
+        );
+        let sv = workspace
+            .register_mut()
+            .contract_to_statevector()
+            .expect("sv");
+        let norm: f64 = sv.iter().map(|a| a.norm_sqr()).sum();
+        assert!((norm - 1.0).abs() < 1e-6, "norm {norm} sv={sv:?}");
+    }
+
+    #[test]
+    fn keepalive_gate_pairs_keep_norm_and_air() {
+        use p3_field::PrimeField32;
+        use wqc_stark_engine::evaluate_execution_trace;
+
+        let angles = [
+            std::f64::consts::PI / 8.0,
+            std::f64::consts::FRAC_PI_4,
+            std::f64::consts::FRAC_PI_2,
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+            3.0 * std::f64::consts::PI / 2.0,
+            0.3,
+            -0.7,
+        ];
+        let mut catalog = Vec::new();
+        for q in 0..2usize {
+            catalog.push(Gate::H(q));
+            catalog.push(Gate::X(q));
+            catalog.push(Gate::Y(q));
+            catalog.push(Gate::Z(q));
+            catalog.push(Gate::S(q));
+            catalog.push(Gate::T(q));
+            for angle in angles {
+                catalog.push(Gate::RX(q, angle));
+                catalog.push(Gate::RY(q, angle));
+                catalog.push(Gate::RZ(q, angle));
+            }
+        }
+        catalog.push(Gate::CNOT(0, 1));
+        catalog.push(Gate::CNOT(1, 0));
+        catalog.push(Gate::CZ(0, 1));
+        catalog.push(Gate::CZ(1, 0));
+
+        let mut rng = 1u64;
+        let mut samples: Vec<Vec<Gate>> = Vec::new();
+        let n = catalog.len();
+        for a in 0..n {
+            for b in 0..n {
+                samples.push(vec![catalog[a].clone(), catalog[b].clone()]);
+            }
+        }
+        for depth in [3usize, 4] {
+            for _ in 0..2_000 {
+                let mut gates = Vec::with_capacity(depth);
+                for _ in 0..depth {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    gates.push(catalog[rng as usize % n].clone());
+                }
+                samples.push(gates);
+            }
+        }
+
+        for gates in &samples {
+            let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+            let mut circuit = Circuit::new(2);
+            for gate in gates {
+                circuit.add(gate.clone()).expect("add");
+            }
+            let trace = circuit
+                .execute_with_trace(workspace.register_mut())
+                .unwrap_or_else(|e| panic!("{gates:?}: {e}"));
+            let air_sum = evaluate_execution_trace(&trace).expect("expand");
+            assert_eq!(
+                air_sum.as_canonical_u32(),
+                0,
+                "{gates:?}: air_sum={}",
+                air_sum.as_canonical_u32()
+            );
+            let sv = workspace
+                .register_mut()
+                .contract_to_statevector()
+                .expect("sv");
+            let norm: f64 = sv.iter().map(|a| a.norm_sqr()).sum();
+            assert!((norm - 1.0).abs() < 1e-6, "{gates:?}: norm {norm}");
         }
     }
 }

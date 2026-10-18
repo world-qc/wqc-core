@@ -4,7 +4,8 @@ use crate::engine::Gate;
 use num_complex::Complex64;
 
 pub type Mat2 = [[Complex64; 2]; 2];
-pub type Mat4 = [[[[Complex64; 2]; 2]; 2]; 2]; // [ctrl_out][tgt_out][ctrl_in][tgt_in]
+/// `[ctrl_out][tgt_out][ctrl_in][tgt_in]`, matching `apply_two_qubit_at_positions`.
+pub type Mat4 = [[[[Complex64; 2]; 2]; 2]; 2];
 
 pub fn unary_matrix(gate: &Gate) -> Mat2 {
     match gate {
@@ -72,9 +73,10 @@ pub fn unary_matrix(gate: &Gate) -> Mat2 {
 pub fn cnot_matrix() -> Mat4 {
     let z = Complex64::new(0.0, 0.0);
     let o = Complex64::new(1.0, 0.0);
+    // Control |0|: target unchanged. Control |1|: target flips.
     [
-        [[[o, z], [z, o]], [[z, z], [z, z]]],
-        [[[z, z], [z, z]], [[z, o], [o, z]]],
+        [[[o, z], [z, z]], [[z, o], [z, z]]],
+        [[[z, z], [z, o]], [[z, z], [o, z]]],
     ]
 }
 
@@ -82,8 +84,11 @@ pub fn cz_matrix() -> Mat4 {
     let z = Complex64::new(0.0, 0.0);
     let o = Complex64::new(1.0, 0.0);
     let m = -Complex64::ONE;
+    // [ctrl_out][tgt_out][ctrl_in][tgt_in]
+    // |00>, |01>, and |10> stay put. |11> picks up -1.
+    // The |01> column used to be zero, so CZ(1, 0) deleted that amplitude.
     [
-        [[[o, z], [z, z]], [[z, z], [z, z]]],
+        [[[o, z], [z, z]], [[z, o], [z, z]]],
         [[[z, z], [o, z]], [[z, z], [z, m]]],
     ]
 }
@@ -91,9 +96,10 @@ pub fn cz_matrix() -> Mat4 {
 pub fn swap_matrix() -> Mat4 {
     let z = Complex64::new(0.0, 0.0);
     let o = Complex64::new(1.0, 0.0);
+    // |01> ↔ |10|. |00> and |11> stay.
     [
-        [[[o, z], [z, z]], [[z, o], [z, z]]],
-        [[[z, z], [o, z]], [[z, z], [z, o]]],
+        [[[o, z], [z, z]], [[z, z], [o, z]]],
+        [[[z, o], [z, z]], [[z, z], [z, o]]],
     ]
 }
 
