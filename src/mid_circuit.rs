@@ -4,6 +4,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+use wqc_stark_engine::{canonicalize_terminal_statevector, z_marginal_from_statevector};
+
 use crate::engine::{EngineError, Gate, MeasureParams};
 use crate::noise::NoiseModel;
 use crate::sample::{outcome_key_from_classical, SampleResult};
@@ -269,7 +271,12 @@ fn simulate_one_shot_with_trace(
             Gate::MEASURE(spec) => {
                 let pre_measure_statevector: Vec<(f64, f64)> =
                     state.state.iter().map(|amp| (amp.re, amp.im)).collect();
-                let (p0, p1) = z_marginal(&state, spec.qubit);
+                // The trajectory witness stores this vector on the 1e-4 digest
+                // grid and the verifier allows only 1e-5 between shot p0/p1 and
+                // that witness. Sample and record the marginal of the same grid.
+                let canonical = canonicalize_terminal_statevector(&pre_measure_statevector);
+                let (p0, p1) = z_marginal_from_statevector(&canonical, spec.qubit, qubit_count)
+                    .unwrap_or_else(|| z_marginal(&state, spec.qubit));
                 let mut outcome = if rng.gen::<f64>() < p0 / (p0 + p1).max(1e-30) {
                     0
                 } else {
@@ -448,8 +455,13 @@ mod tests {
         assert_eq!(first.gate_index, 1);
         assert_eq!(first.qubit, 0);
         assert_eq!(first.cbit, 0);
-        assert!((first.p0 - 0.5).abs() < 1e-9, "p0={}", first.p0);
-        assert!((first.p1 - 0.5).abs() < 1e-9, "p1={}", first.p1);
+        let canonical = canonicalize_terminal_statevector(&first.pre_measure_statevector);
+        let (expected_p0, expected_p1) =
+            z_marginal_from_statevector(&canonical, first.qubit, 2).expect("marginal");
+        assert_eq!(first.p0, expected_p0);
+        assert_eq!(first.p1, expected_p1);
+        assert!((first.p0 - 0.5).abs() < 1e-4, "p0={}", first.p0);
+        assert!((first.p1 - 0.5).abs() < 1e-4, "p1={}", first.p1);
         assert!(trace
             .traces
             .iter()
