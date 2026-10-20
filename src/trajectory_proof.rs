@@ -136,6 +136,47 @@ mod tests {
     };
 
     #[test]
+    fn off_grid_rotation_marginals_match_canonical_witness() {
+        use wqc_stark_engine::air::shot_sampling::evaluate_trajectory_shot_sampling_constraints;
+        use wqc_stark_engine::air::trajectory::evaluate_trajectory_marginal_constraints;
+
+        let gates = vec![
+            Gate::RX(0, 0.3),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::X(1)),
+            }),
+            Gate::MEASURE(MeasureParams { qubit: 1, cbit: 1 }),
+        ];
+        let (_, trace) =
+            sample_mid_circuit_measurements_with_trace(&gates, 2, 2, 4, 11, None).expect("trace");
+        let raw = &trace.traces[0].measures[0];
+        let raw_p0: f64 = raw
+            .pre_measure_statevector
+            .iter()
+            .enumerate()
+            .filter(|(basis, _)| basis & 1 == 0)
+            .map(|(_, (re, im))| re * re + im * im)
+            .sum();
+        assert!(
+            (raw.p0 - raw_p0).abs() > 1e-5,
+            "fixture must sit off the canonical grid (raw {raw_p0}, recorded {})",
+            raw.p0
+        );
+
+        let segment = build_trajectory_segment(&trace, 2, 11, 4, "spec".into());
+        assert!(evaluate_trajectory_marginal_constraints(&segment));
+        assert!(evaluate_trajectory_shot_sampling_constraints(&segment));
+
+        let proof = append_trajectory_tail(Vec::new(), &segment);
+        let (_, tail) = wqc_stark_engine::split_trajectory_tail(&proof).expect("split");
+        let (payload, marker) = tail.expect("tail");
+        decode_and_verify_trajectory_tail(payload, marker).expect("verify");
+    }
+
+    #[test]
     fn trajectory_digest_matches_stark_engine_json() {
         let gates = vec![
             Gate::H(0),
