@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{BornBinding, DistributionSegment};
 
-use crate::engine::MeasureParams;
+use crate::engine::{snap_amplitude_component, MeasureParams};
 use crate::sample::compute_outcome_probabilities;
 use crate::tn::MpsState;
 
@@ -155,7 +155,19 @@ pub fn build_terminal_distribution_segment(
         .iter()
         .map(|m| (m.qubit as u32, m.cbit as u32))
         .collect();
-    let terminal_statevector: Vec<(f64, f64)> = statevector.iter().map(|c| (c.re, c.im)).collect();
+    // Claimed probabilities snap each component onto AMPLITUDE_GRID before |z|^2.
+    // The Born check recomputes from this vector with no second snap, so the
+    // stored amplitudes must already sit on that grid or a snapped-away dust
+    // key fails `probabilities_match`.
+    let terminal_statevector: Vec<(f64, f64)> = statevector
+        .iter()
+        .map(|c| {
+            (
+                snap_amplitude_component(c.re),
+                snap_amplitude_component(c.im),
+            )
+        })
+        .collect();
     let born_binding = BornBinding::from_specs(
         state.qubit_count as u32,
         classical_bit_count as u32,
@@ -338,6 +350,51 @@ mod tests {
         let segment =
             build_terminal_distribution_segment(workspace.register_mut(), &measures, 2, 256, 99)
                 .expect("segment");
+        assert_eq!(evaluate_born_constraint_sum(&segment), 0);
+    }
+
+    #[test]
+    fn snapped_terminal_amplitudes_drop_dust_keys() {
+        use wqc_stark_engine::air::distribution::{
+            born_probabilities_from_statevector, evaluate_born_constraint_sum, BornMeasureSpec,
+        };
+
+        let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
+        let mut circuit = Circuit::new(1);
+        // Half-angle sine is ~5e-9, below half of AMPLITUDE_GRID, so the |1>
+        // component snaps to zero while the raw amplitude is still nonzero.
+        circuit.add(Gate::RY(0, 1e-8)).expect("ry");
+        circuit
+            .execute_with_trace(workspace.register_mut())
+            .expect("unitary");
+
+        let raw = workspace
+            .register_mut()
+            .contract_to_statevector()
+            .expect("sv");
+        let raw_pairs: Vec<(f64, f64)> = raw.iter().map(|c| (c.re, c.im)).collect();
+        let raw_probs = born_probabilities_from_statevector(
+            &raw_pairs,
+            1,
+            &[BornMeasureSpec { qubit: 0, cbit: 0 }],
+            1,
+        )
+        .expect("raw born");
+        assert!(
+            raw_probs.contains_key("1"),
+            "fixture must keep a raw dust outcome"
+        );
+
+        let measures = vec![MeasureParams { qubit: 0, cbit: 0 }];
+        let segment =
+            build_terminal_distribution_segment(workspace.register_mut(), &measures, 1, 32, 7)
+                .expect("segment");
+        assert!(segment.probabilities.iter().all(|(key, _)| key != "1"));
+        let binding = segment.born_binding.as_ref().expect("born binding");
+        for (re, im) in &binding.terminal_statevector {
+            assert_eq!(*re, snap_amplitude_component(*re));
+            assert_eq!(*im, snap_amplitude_component(*im));
+        }
         assert_eq!(evaluate_born_constraint_sum(&segment), 0);
     }
 
