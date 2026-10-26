@@ -33,6 +33,9 @@
 - `mps_max_bond_dim` — effective χ ceiling from env
 
 Memory estimate per slice: `≈ N · χ² · 32` bytes (vs `2^N · 16` for dense).
+MPS allocation is bounded by that workspace against the host budget, not by a fixed
+qubit cap. The dense reference in `dense.rs` still rejects `N > 40`. Scalar readout
+is `⟨0…0|ψ⟩`. `contract_to_statevector` still requires `N ≤ 20`.
 
 ## WebGPU backend (Phase 2c)
 

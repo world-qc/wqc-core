@@ -168,3 +168,14 @@ impl DenseTnState {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_still_rejects_above_40_qubits() {
+        assert!(DenseTnState::try_new(41).is_err());
+        assert!(DenseTnState::try_new(2).is_ok());
+    }
+}

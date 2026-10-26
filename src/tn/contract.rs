@@ -212,4 +212,20 @@ mod tests {
         assert!((r_id.real - r_rev.real).abs() < 1e-8);
         assert!((r_id.imag - r_rev.imag).abs() < 1e-8);
     }
+
+    #[test]
+    fn scalar_50_and_100_qubit_product_amplitude() {
+        let inv_sqrt2 = 1.0 / 2.0f64.sqrt();
+        for n in [50usize, 100] {
+            let gates = vec![Gate::H(0)];
+            let mut mps = MpsState::try_new_with_bond(n, 128).expect("mps");
+            let (result, _) = contract_slice(n, &gates, &[], n, &mut mps).expect("contract");
+            assert!(
+                (result.real - inv_sqrt2).abs() < 1e-8,
+                "n={n} real {}",
+                result.real
+            );
+            assert!(result.imag.abs() < 1e-8, "n={n} imag {}", result.imag);
+        }
+    }
 }

@@ -23,6 +23,30 @@ use super::engine_status::shared_gpu_device;
 #[cfg(feature = "webgpu")]
 use super::gpu::GpuMpsDevice;
 
+/// Bytes for `qubit_count` site tensors at bond `max_bond_dim`: `N · χ² · 32`.
+pub fn mps_workspace_bytes(qubit_count: usize, max_bond_dim: usize) -> u64 {
+    (qubit_count as u64)
+        .saturating_mul(max_bond_dim as u64)
+        .saturating_mul(max_bond_dim as u64)
+        .saturating_mul(32)
+}
+
+/// Reject when the MPS workspace exceeds the host budget (total RAM minus reserve).
+/// A zero `total_memory` skips the check, matching a host that did not report RAM.
+pub fn ensure_mps_workspace_budget(required: u64, total_memory: u64) -> Result<(), EngineError> {
+    if total_memory == 0 {
+        return Ok(());
+    }
+    let budget = max_wqc_memory_bytes_from_total(total_memory);
+    if required > budget {
+        return Err(EngineError::InsufficientMemory {
+            required,
+            available: budget,
+        });
+    }
+    Ok(())
+}
+
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.
 pub struct MpsState {
     pub sites: Vec<Array3<Complex64>>,
@@ -49,7 +73,7 @@ impl MpsState {
     }
 
     pub fn try_new_with_bond(qubit_count: usize, max_bond_dim: usize) -> Result<Self, EngineError> {
-        if qubit_count == 0 || qubit_count > 40 {
+        if qubit_count == 0 {
             return Err(EngineError::InvalidQubitCount(qubit_count));
         }
         if max_bond_dim == 0 {
@@ -58,22 +82,13 @@ impl MpsState {
             ));
         }
 
-        let estimated_bytes = (qubit_count as u64)
-            .saturating_mul(max_bond_dim as u64)
-            .saturating_mul(max_bond_dim as u64)
-            .saturating_mul(32);
+        let estimated_bytes = mps_workspace_bytes(qubit_count, max_bond_dim);
 
         if !cfg!(test) {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_memory();
             let total = sys.total_memory();
-            let budget = max_wqc_memory_bytes_from_total(total);
-            if total > 0 && estimated_bytes > budget {
-                return Err(EngineError::InsufficientMemory {
-                    required: estimated_bytes,
-                    available: budget,
-                });
-            }
+            ensure_mps_workspace_budget(estimated_bytes, total)?;
         }
 
         let mut sites = Vec::with_capacity(qubit_count);
@@ -1188,5 +1203,40 @@ mod tests {
             }
         }
         assert!(err < 1e-6, "rebuild err {err}");
+    }
+
+    #[test]
+    fn mps_accepts_registers_above_40_qubits() {
+        assert!(MpsState::try_new_with_bond(0, 8).is_err());
+        assert!(MpsState::try_new_with_bond(41, 8).is_ok());
+        assert!(MpsState::try_new_with_bond(100, 128).is_ok());
+    }
+
+    #[test]
+    fn statevector_projection_still_rejects_above_20() {
+        let mps = MpsState::try_new_with_bond(21, 4).expect("mps");
+        let err = mps.contract_to_statevector().expect_err("21q statevector");
+        assert!(err.to_string().contains("qubit_count <= 20"));
+    }
+
+    #[test]
+    fn mps_workspace_over_host_budget_is_insufficient_memory() {
+        let required = mps_workspace_bytes(100, 128);
+        assert_eq!(required, 52_428_800);
+        let total = 8 * 1024 * 1024 * 1024;
+        let budget = max_wqc_memory_bytes_from_total(total);
+        assert!(required < budget);
+        assert!(ensure_mps_workspace_budget(required, total).is_ok());
+        let err = ensure_mps_workspace_budget(budget + 1, total).expect_err("over budget");
+        match err {
+            EngineError::InsufficientMemory {
+                required,
+                available,
+            } => {
+                assert_eq!(required, budget + 1);
+                assert_eq!(available, budget);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
