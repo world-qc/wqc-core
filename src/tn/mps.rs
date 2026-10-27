@@ -1176,11 +1176,14 @@ fn adjoint_mat4(u: &Mat4) -> Mat4 {
     out
 }
 
-/// Work-report mark: both half sweeps are in the STARK; the overlap is not.
-/// Informational on the node: the orchestrator overwrites from `MpsTimeSplit`.
+/// Work-report mark: both half sweeps are in the unitary AIR. The overlap is
+/// a separate transcript tail (claimed MPS tensors → amplitude), not an AIR
+/// row on the half sweeps. Informational on the node: the orchestrator
+/// overwrites from `MpsTimeSplit`.
 pub const PROOF_SCOPE_TIME_SPLIT_HALVES: &str = "mps_time_split_halves";
-/// Work-report mark: only the first half is in the STARK (second half has a
-/// gate with no Gate-level adjoint expansion, e.g. MEASURE).
+/// Work-report mark: only the first half is in the unitary AIR (second half
+/// has a gate with no Gate-level adjoint expansion, e.g. MEASURE). Overlap
+/// still ships as a separate tail when the path emits one.
 pub const PROOF_SCOPE_TIME_SPLIT_FIRST_HALF: &str = "mps_time_split_first_half";
 
 /// `<0|U|0>` as an overlap of two MPS.
@@ -1201,16 +1204,17 @@ pub fn contract_time_split(
 
 /// Same as [`contract_time_split`], plus an AIR trace for the half sweeps.
 ///
-/// The overlap itself has no AIR row. When every gate in the second half has a
-/// Gate-level adjoint sequence, both halves are traced and the scope is
-/// [`PROOF_SCOPE_TIME_SPLIT_HALVES`]. Otherwise only the first half is traced
-/// ([`PROOF_SCOPE_TIME_SPLIT_FIRST_HALF`]).
+/// Returns the ket/bra MPS so the caller can emit an [`OverlapSegment`]
+/// binding the tensors to the published amplitude. When every gate in the
+/// second half has a Gate-level adjoint sequence, both halves are traced and
+/// the scope is [`PROOF_SCOPE_TIME_SPLIT_HALVES`]. Otherwise only the first
+/// half is traced ([`PROOF_SCOPE_TIME_SPLIT_FIRST_HALF`]).
 pub fn contract_time_split_with_trace(
     qubit_count: usize,
     gates: &[Gate],
     split: usize,
     max_bond: usize,
-) -> Result<(Complex64, Vec<f64>, &'static str), EngineError> {
+) -> Result<(Complex64, Vec<f64>, &'static str, MpsState, MpsState), EngineError> {
     if split > gates.len() {
         return Err(EngineError::ExecutionFailed(
             "time-split index past the gate list".into(),
@@ -1231,7 +1235,78 @@ pub fn contract_time_split_with_trace(
         PROOF_SCOPE_TIME_SPLIT_FIRST_HALF
     };
     let amp = overlap(&ket, &bra)?;
-    Ok((amp, trace, scope))
+    Ok((amp, trace, scope, ket, bra))
+}
+
+/// Build an overlap STARK witness from the time-split ket/bra MPS and snapped amplitude.
+pub fn build_overlap_segment(
+    ket: &MpsState,
+    bra: &MpsState,
+    amplitude: &crate::engine::ComplexResult,
+) -> Result<wqc_stark_engine::OverlapSegment, EngineError> {
+    use wqc_stark_engine::{
+        calculate_amplitude_digest, OverlapSegment, OVERLAP_ENV_LIMIT, OVERLAP_MAX_BOND,
+    };
+
+    if ket.qubit_count != bra.qubit_count {
+        return Err(EngineError::MismatchedRegister);
+    }
+    let n = ket.qubit_count;
+    let mut ket_sites = Vec::with_capacity(n);
+    let mut bra_sites = Vec::with_capacity(n);
+    for site in 0..n {
+        let kt = &ket.sites[site];
+        let bt = &bra.sites[site];
+        let (k_left, k_phys, k_right) = kt.dim();
+        let (b_left, b_phys, b_right) = bt.dim();
+        if k_phys != 2 || b_phys != 2 {
+            return Err(EngineError::ExecutionFailed(
+                "mps site physical dim must be 2".into(),
+            ));
+        }
+        if k_left > OVERLAP_MAX_BOND
+            || k_right > OVERLAP_MAX_BOND
+            || b_left > OVERLAP_MAX_BOND
+            || b_right > OVERLAP_MAX_BOND
+        {
+            return Err(EngineError::ExecutionFailed(
+                "mps overlap site bond exceeds STARK witness limit 16".into(),
+            ));
+        }
+        if k_right.saturating_mul(b_right) > OVERLAP_ENV_LIMIT {
+            return Err(EngineError::ExecutionFailed(
+                "mps overlap environment exceeds 256".into(),
+            ));
+        }
+        ket_sites.push(site_to_overlap_tensor(kt));
+        bra_sites.push(site_to_overlap_tensor(bt));
+    }
+    Ok(OverlapSegment {
+        qubit_count: n as u32,
+        amplitude_re: amplitude.real,
+        amplitude_im: amplitude.imag,
+        amplitude_digest: calculate_amplitude_digest(amplitude.real, amplitude.imag),
+        ket_sites,
+        bra_sites,
+    })
+}
+
+fn site_to_overlap_tensor(site: &Array3<Complex64>) -> wqc_stark_engine::OverlapSiteTensor {
+    let (left, phys, right) = site.dim();
+    let mut values = Vec::with_capacity(left * phys * right);
+    for a in 0..left {
+        for s in 0..phys {
+            for b in 0..right {
+                let c = site[[a, s, b]];
+                values.push((c.re, c.im));
+            }
+        }
+    }
+    wqc_stark_engine::OverlapSiteTensor {
+        left_dim: left as u32,
+        right_dim: right as u32,
+        values,
+    }
 }
 
 fn time_split_boundaries(
@@ -1480,7 +1555,8 @@ mod tests {
         // Keep this tiny: execute_with_trace on a 16q depth-16 half is minutes
         // in debug. The dense match above covers the amplitude path.
         let gates = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RY(1, 0.3)];
-        let (_, _, scope) = contract_time_split_with_trace(2, &gates, 2, 128).expect("traced");
+        let (_, _, scope, _, _) =
+            contract_time_split_with_trace(2, &gates, 2, 128).expect("traced");
         assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
     }
 
@@ -1491,7 +1567,7 @@ mod tests {
         let n = 18usize;
         let (gates, split) = ry_cnot_brickwork(n, 4);
         let plain = contract_time_split(n, &gates, split, 128).expect("plain");
-        let (traced, _, scope) =
+        let (traced, _, scope, _, _) =
             contract_time_split_with_trace(n, &gates, split, 128).expect("traced");
         assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
         assert!(
@@ -1561,7 +1637,8 @@ mod tests {
     fn time_split_with_s_and_t_keeps_halves_proof_scope() {
         let gates = vec![Gate::H(0), Gate::S(0), Gate::T(0)];
         let plain = contract_time_split(1, &gates, 1, 128).expect("plain");
-        let (traced, _, scope) = contract_time_split_with_trace(1, &gates, 1, 128).expect("traced");
+        let (traced, _, scope, _, _) =
+            contract_time_split_with_trace(1, &gates, 1, 128).expect("traced");
         assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
         assert!((plain - traced).norm() < 1e-8, "{plain} vs {traced}");
         let mut dense = crate::tn::dense::DenseTnState::try_new(1).expect("dense");
@@ -1569,6 +1646,81 @@ mod tests {
             dense.apply_gate(g);
         }
         assert!((plain - dense.state[0]).norm() < 1e-8);
+    }
+
+    #[test]
+    fn overlap_segment_from_time_split_verifies_and_rejects_tamper() {
+        use wqc_stark_engine::verify_overlap_segment;
+
+        let gates = vec![Gate::H(0), Gate::S(0), Gate::RZ(0, 0.4)];
+        let (amp, _, _, ket, bra) =
+            contract_time_split_with_trace(1, &gates, 2, 16).expect("traced");
+        let snapped = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+            real: amp.re,
+            imag: amp.im,
+        });
+        let segment = build_overlap_segment(&ket, &bra, &snapped).expect("segment");
+        assert!(verify_overlap_segment(&segment));
+
+        let mut bad = segment.clone();
+        bad.amplitude_re = 0.0;
+        bad.amplitude_digest =
+            wqc_stark_engine::calculate_amplitude_digest(bad.amplitude_re, bad.amplitude_im);
+        assert!(!verify_overlap_segment(&bad));
+
+        let cnot = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RY(1, 0.25)];
+        let (amp2, _, _, ket2, bra2) =
+            contract_time_split_with_trace(2, &cnot, 2, 16).expect("cnot");
+        let snapped2 = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+            real: amp2.re,
+            imag: amp2.im,
+        });
+        let seg2 = build_overlap_segment(&ket2, &bra2, &snapped2).expect("cnot segment");
+        assert!(verify_overlap_segment(&seg2));
+    }
+
+    #[test]
+    fn overlap_segment_brickwork_nontrivial_amplitude_verifies() {
+        // Regression for M31 1e-4 snap vs 1e-5 eps: honest RY+CNOT splits with
+        // O(1) amplitude must verify. Depth-6 midpoint on 4–12q is enough.
+        use wqc_stark_engine::verify_overlap_segment;
+
+        for n in [4usize, 8, 12] {
+            let (gates, split) = ry_cnot_brickwork(n, 6);
+            assert!(split > 0 && split < gates.len(), "n={n} split={split}");
+            let (amp, _, _, ket, bra) =
+                contract_time_split_with_trace(n, &gates, split, 16).expect("traced");
+            assert!(
+                amp.norm() > 1e-3,
+                "n={n}: need nontrivial amplitude, got {amp}"
+            );
+            let snapped = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+                real: amp.re,
+                imag: amp.im,
+            });
+            let segment = build_overlap_segment(&ket, &bra, &snapped).expect("segment");
+            assert!(
+                verify_overlap_segment(&segment),
+                "n={n} amp=({}, {})",
+                snapped.real,
+                snapped.imag
+            );
+        }
+    }
+
+    #[test]
+    fn build_overlap_segment_rejects_env_above_256() {
+        let ket = forced_bond_mps(3, 17);
+        let bra = forced_bond_mps(3, 17);
+        let zero = crate::engine::ComplexResult {
+            real: 0.0,
+            imag: 0.0,
+        };
+        let err = build_overlap_segment(&ket, &bra, &zero).expect_err("bond 17");
+        assert!(
+            err.to_string().contains("16") || err.to_string().contains("256"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]

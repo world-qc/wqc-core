@@ -118,8 +118,9 @@ pub struct WorkReport {
     #[serde(default)]
     pub vram_peak_bytes: u64,
     /// Empty for a full unitary sweep. Time-split scalars set
-    /// `mps_time_split_halves` or `mps_time_split_first_half` here as a hint.
-    /// The orchestrator overwrites from its own `MpsTimeSplit`; trust that.
+    /// `mps_time_split_halves` or `mps_time_split_first_half` here as a hint
+    /// (which half sweeps are in the unitary AIR). Overlap is a separate
+    /// proof tail. The orchestrator overwrites from its own `MpsTimeSplit`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub proof_scope: String,
 }
@@ -298,6 +299,7 @@ pub async fn handle_compute(
 
     let compute_start = std::time::Instant::now();
     let mut proof_scope = String::new();
+    let mut overlap_ket_bra: Option<(crate::tn::MpsState, crate::tn::MpsState)> = None;
     let (complex_result, execution_trace) = if let Some(split) = task.mps_time_split {
         if task.output_mode != OutputMode::StatevectorScalar {
             return Err((
@@ -318,7 +320,7 @@ pub async fn handle_compute(
             ));
         }
         let chi = crate::tn::resolve_bond_dim(task.mps_max_bond_dim);
-        let (amp, trace, scope) = crate::tn::mps::contract_time_split_with_trace(
+        let (amp, trace, scope, ket, bra) = crate::tn::mps::contract_time_split_with_trace(
             task.qubit_count,
             &unitary_gates,
             split,
@@ -326,6 +328,7 @@ pub async fn handle_compute(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         proof_scope = scope.to_string();
+        overlap_ket_bra = Some((ket, bra));
         (
             crate::engine::ComplexResult {
                 real: amp.re,
@@ -345,6 +348,14 @@ pub async fn handle_compute(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
     let complex_result = snap_complex_result(complex_result);
+    let overlap_segment = if let Some((ket, bra)) = overlap_ket_bra.as_ref() {
+        Some(
+            crate::tn::mps::build_overlap_segment(ket, bra, &complex_result)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let (sample_result, mid_circuit_trace) = if task.output_mode == OutputMode::SampleCounts {
         let classical_bit_count = task.classical_bit_count.unwrap_or(0);
@@ -462,6 +473,7 @@ pub async fn handle_compute(
             &execution_trace,
             distribution_segment.as_ref(),
             trajectory_segment.as_ref(),
+            overlap_segment.as_ref(),
             &task.security_level,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
