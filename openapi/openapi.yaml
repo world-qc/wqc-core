@@ -552,6 +552,14 @@ components:
           items:
             type: integer
             minimum: 0
+        mps_time_split:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: |
+            Gate index that splits a scalar into two MPS sweeps. Absent means
+            one sweep. Only valid for `statevector_scalar` with no slice
+            assignments.
         output_mode:
           $ref: "#/components/schemas/OutputMode"
         classical_bit_count:
@@ -682,6 +690,13 @@ components:
           type: integer
           format: int64
           description: Peak VRAM on the WebGPU path; 0 otherwise
+        proof_scope:
+          type: string
+          description: |
+            Empty for a full unitary sweep. Time-split scalars may set
+            `mps_time_split_halves` or `mps_time_split_first_half` as a node
+            hint. The orchestrator overwrites from its own `mps_time_split`;
+            do not trust this field for settlement.
 
     DistributionProofStatus:
       type: object
