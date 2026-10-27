@@ -314,13 +314,22 @@ impl MpsState {
         tgt: usize,
         u: &Mat4,
     ) -> Result<(), EngineError> {
-        let (c, t) = if ctrl < tgt { (ctrl, tgt) } else { (tgt, ctrl) };
-        if c + 1 != t {
-            for pos in c..t - 1 {
+        let (left, right) = if ctrl < tgt { (ctrl, tgt) } else { (tgt, ctrl) };
+        // Slide `right` down to `left + 1`, apply, then undo the swaps.
+        // Leaving the qubits permuted makes the next gate hit the wrong pair.
+        let span = right - left;
+        if span > 1 {
+            for pos in (left + 1..right).rev() {
                 self.apply_swap_positions(pos, pos + 1)?;
             }
         }
-        self.apply_two_qubit_at_positions(c, c + 1, u, ctrl < tgt)
+        self.apply_two_qubit_at_positions(left, left + 1, u, ctrl < tgt)?;
+        if span > 1 {
+            for pos in left + 1..right {
+                self.apply_swap_positions(pos, pos + 1)?;
+            }
+        }
+        Ok(())
     }
 
     fn apply_two_qubit_at_positions(
@@ -1119,6 +1128,33 @@ mod tests {
         };
         assert!((dense[0].re - expected.re).abs() < 1e-6);
         assert!((dense[0].im - expected.im).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nonadjacent_two_qubit_gates_match_dense_statevector() {
+        // Gates that are not neighbors on the MPS path. The zero amplitude
+        // alone stays 1/sqrt(2) even if a swap is applied to the wrong pair.
+        let gates = vec![
+            Gate::H(0),
+            Gate::H(1),
+            Gate::CNOT(0, 2),
+            Gate::CZ(3, 1),
+            Gate::CNOT(2, 0),
+        ];
+        let chi = exact_bond_dim(4);
+        let mut mps = MpsState::try_new_with_bond(4, chi).expect("mps");
+        for g in &gates {
+            mps.apply_gate(g).expect("apply");
+        }
+        let mut dense = crate::tn::dense::DenseTnState::try_new(4).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        let got = mps.to_dense_state();
+        assert_eq!(got.len(), dense.state.len());
+        for (i, (x, y)) in got.iter().zip(dense.state.iter()).enumerate() {
+            assert!((x - y).norm() < 1e-8, "amp[{i}] mps={x} dense={y}");
+        }
     }
 
     #[test]
