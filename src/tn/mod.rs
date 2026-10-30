@@ -13,6 +13,7 @@ pub mod mps;
 pub mod site_order;
 pub mod svd_guard;
 pub mod trace;
+pub mod tree;
 
 #[cfg(feature = "webgpu")]
 pub mod gpu;

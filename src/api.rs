@@ -64,6 +64,9 @@ pub struct ComputeTask {
     /// Gate index that splits a scalar into two MPS sweeps. Absent means one sweep.
     #[serde(default)]
     pub mps_time_split: Option<usize>,
+    /// Sweep contraction tree on the parent circuit. Absent keeps `contract_slice`.
+    #[serde(default)]
+    pub contraction_tree: Option<crate::tn::tree::ContractionTree>,
     /// Result mode (default: contracted scalar amplitude).
     #[serde(default)]
     pub output_mode: OutputMode,
@@ -259,6 +262,23 @@ fn committed_measurement_spec_hash(circuit: &[crate::engine::Gate]) -> String {
     crate::distribution_proof::calculate_measurement_spec_hash(&measures)
 }
 
+fn validate_contraction_tree_task(task: &ComputeTask) -> Result<(), String> {
+    let Some(tree) = task.contraction_tree.as_ref() else {
+        return Ok(());
+    };
+    crate::tn::tree::validate_sweep_dispatch(&crate::tn::tree::SweepDispatch {
+        scalar: task.output_mode == OutputMode::StatevectorScalar,
+        qubit_count: task.qubit_count,
+        original_qubit_count: task.original_qubit_count,
+        assignments_empty: task.slice_assignments.is_empty(),
+        time_split: task.mps_time_split.is_some(),
+        mps_site_order: task.mps_site_order.as_deref(),
+        gates: &task.circuit,
+        tree,
+    })
+    .map_err(|e| e.to_string())
+}
+
 // --- Handlers ---
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
@@ -276,7 +296,11 @@ pub async fn handle_compute(
     );
 
     let logical_spec_hash = committed_measurement_spec_hash(&task.circuit);
-    apply_mps_site_order(&mut task).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if task.contraction_tree.is_some() {
+        validate_contraction_tree_task(&task).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    } else {
+        apply_mps_site_order(&mut task).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
 
     let measures = crate::mid_circuit::collect_measures(&task.circuit);
     validate_task(&task, &measures).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -300,7 +324,16 @@ pub async fn handle_compute(
     let compute_start = std::time::Instant::now();
     let mut proof_scope = String::new();
     let mut overlap_ket_bra: Option<(crate::tn::MpsState, crate::tn::MpsState)> = None;
-    let (complex_result, execution_trace) = if let Some(split) = task.mps_time_split {
+    let (complex_result, execution_trace) = if let Some(tree) = task.contraction_tree.as_ref() {
+        crate::tn::tree::contract_tree(
+            task.qubit_count,
+            &task.circuit,
+            tree,
+            task.mps_site_order.as_deref(),
+            workspace.register_mut(),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else if let Some(split) = task.mps_time_split {
         if task.output_mode != OutputMode::StatevectorScalar {
             return Err((
                 StatusCode::BAD_REQUEST,
