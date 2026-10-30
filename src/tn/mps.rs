@@ -23,11 +23,42 @@ use super::engine_status::shared_gpu_device;
 #[cfg(feature = "webgpu")]
 use super::gpu::GpuMpsDevice;
 
+/// Bytes for `qubit_count` site tensors at bond `max_bond_dim`: `N · χ² · 32`.
+pub fn mps_workspace_bytes(qubit_count: usize, max_bond_dim: usize) -> u64 {
+    (qubit_count as u64)
+        .saturating_mul(max_bond_dim as u64)
+        .saturating_mul(max_bond_dim as u64)
+        .saturating_mul(32)
+}
+
+/// Reject when the MPS workspace exceeds the host budget (total RAM minus reserve).
+/// A zero `total_memory` skips the check, matching a host that did not report RAM.
+pub fn ensure_mps_workspace_budget(required: u64, total_memory: u64) -> Result<(), EngineError> {
+    if total_memory == 0 {
+        return Ok(());
+    }
+    let budget = max_wqc_memory_bytes_from_total(total_memory);
+    if required > budget {
+        return Err(EngineError::InsufficientMemory {
+            required,
+            available: budget,
+        });
+    }
+    Ok(())
+}
+
 /// MPS executor: one site tensor per qubit wire `[left_bond × 2 × right_bond]`.
+/// Product of the two boundary bonds in a time-split overlap. 16×16 is the
+/// largest product that stays inside the existing 256-side two-site matrix.
+const OVERLAP_ENV_LIMIT: usize = 256;
+
 pub struct MpsState {
     pub sites: Vec<Array3<Complex64>>,
     pub qubit_count: usize,
     pub max_bond_dim: usize,
+    /// When set, a split that would drop a singular value above the cutoff
+    /// returns an error instead of shortening the bond.
+    reject_truncation: bool,
     #[cfg(feature = "webgpu")]
     gpu: Option<Arc<GpuMpsDevice>>,
     #[cfg(feature = "webgpu")]
@@ -49,7 +80,7 @@ impl MpsState {
     }
 
     pub fn try_new_with_bond(qubit_count: usize, max_bond_dim: usize) -> Result<Self, EngineError> {
-        if qubit_count == 0 || qubit_count > 40 {
+        if qubit_count == 0 {
             return Err(EngineError::InvalidQubitCount(qubit_count));
         }
         if max_bond_dim == 0 {
@@ -58,22 +89,13 @@ impl MpsState {
             ));
         }
 
-        let estimated_bytes = (qubit_count as u64)
-            .saturating_mul(max_bond_dim as u64)
-            .saturating_mul(max_bond_dim as u64)
-            .saturating_mul(32);
+        let estimated_bytes = mps_workspace_bytes(qubit_count, max_bond_dim);
 
         if !cfg!(test) {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_memory();
             let total = sys.total_memory();
-            let budget = max_wqc_memory_bytes_from_total(total);
-            if total > 0 && estimated_bytes > budget {
-                return Err(EngineError::InsufficientMemory {
-                    required: estimated_bytes,
-                    available: budget,
-                });
-            }
+            ensure_mps_workspace_budget(estimated_bytes, total)?;
         }
 
         let mut sites = Vec::with_capacity(qubit_count);
@@ -93,6 +115,7 @@ impl MpsState {
             sites,
             qubit_count,
             max_bond_dim,
+            reject_truncation: false,
             #[cfg(feature = "webgpu")]
             gpu: shared_gpu_device(),
             #[cfg(feature = "webgpu")]
@@ -273,6 +296,40 @@ impl MpsState {
         Ok(())
     }
 
+    /// Apply `U†`. H, X, Y, Z, CNOT, CZ, and CCNOT are their own adjoints.
+    /// S, T, and the rotations are the conjugate transpose of the gate matrix.
+    fn apply_gate_adjoint(&mut self, gate: &Gate) -> Result<(), EngineError> {
+        match gate {
+            Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => {
+                return Err(EngineError::ExecutionFailed(
+                    "time-split overlap does not apply measurement or reset".into(),
+                ));
+            }
+            Gate::CCNOT(c1, c2, t) => self.apply_ccnot(*c1, *c2, *t)?,
+            Gate::CNOT(c, t) => {
+                let u = adjoint_mat4(&two_qubit_matrix(gate));
+                self.apply_two_qubit_gate(*c, *t, &u)?;
+            }
+            Gate::CZ(c, t) => {
+                let u = adjoint_mat4(&two_qubit_matrix(gate));
+                self.apply_two_qubit_gate(*c, *t, &u)?;
+            }
+            Gate::H(t)
+            | Gate::X(t)
+            | Gate::Y(t)
+            | Gate::Z(t)
+            | Gate::S(t)
+            | Gate::T(t)
+            | Gate::RX(t, _)
+            | Gate::RY(t, _)
+            | Gate::RZ(t, _) => {
+                let u = adjoint_mat2(&unary_matrix(gate));
+                self.apply_one_qubit(*t, &u);
+            }
+        }
+        Ok(())
+    }
+
     fn apply_one_qubit(&mut self, qubit: usize, u: &[[Complex64; 2]; 2]) {
         #[cfg(feature = "webgpu")]
         if self.gpu_one_qubit(qubit, u) {
@@ -299,13 +356,22 @@ impl MpsState {
         tgt: usize,
         u: &Mat4,
     ) -> Result<(), EngineError> {
-        let (c, t) = if ctrl < tgt { (ctrl, tgt) } else { (tgt, ctrl) };
-        if c + 1 != t {
-            for pos in c..t - 1 {
+        let (left, right) = if ctrl < tgt { (ctrl, tgt) } else { (tgt, ctrl) };
+        // Slide `right` down to `left + 1`, apply, then undo the swaps.
+        // Leaving the qubits permuted makes the next gate hit the wrong pair.
+        let span = right - left;
+        if span > 1 {
+            for pos in (left + 1..right).rev() {
                 self.apply_swap_positions(pos, pos + 1)?;
             }
         }
-        self.apply_two_qubit_at_positions(c, c + 1, u, ctrl < tgt)
+        self.apply_two_qubit_at_positions(left, left + 1, u, ctrl < tgt)?;
+        if span > 1 {
+            for pos in left + 1..right {
+                self.apply_swap_positions(pos, pos + 1)?;
+            }
+        }
+        Ok(())
     }
 
     fn apply_two_qubit_at_positions(
@@ -533,11 +599,16 @@ impl MpsState {
     ) -> Result<(Array3<Complex64>, Array3<Complex64>), EngineError> {
         #[cfg(feature = "webgpu")]
         {
-            split_theta(self.gpu.as_deref(), updated, self.max_bond_dim)
+            split_theta(
+                self.gpu.as_deref(),
+                updated,
+                self.max_bond_dim,
+                self.reject_truncation,
+            )
         }
         #[cfg(not(feature = "webgpu"))]
         {
-            split_theta(updated, self.max_bond_dim)
+            split_theta(updated, self.max_bond_dim, self.reject_truncation)
         }
     }
 
@@ -822,13 +893,19 @@ fn split_theta(
     #[cfg(feature = "webgpu")] gpu: Option<&super::gpu::GpuMpsDevice>,
     theta: Array4<Complex64>,
     max_bond: usize,
+    reject_truncation: bool,
 ) -> Result<(Array3<Complex64>, Array3<Complex64>), EngineError> {
+    // An exact half must not take the range-finder. That path keeps χ modes
+    // and does not report the weight it dropped.
+    if reject_truncation {
+        return svd_split_two_site(theta, max_bond, true);
+    }
     let (dl, _, _, dr) = theta.dim();
     let rows = dl * 2;
     let cols = 2 * dr;
     let ell = max_bond.saturating_add(RSVD_OVERSAMPLE).min(rows).min(cols);
     if ell == 0 || ell >= rows.min(cols) || !rsvd_worth(rows, cols, ell) {
-        return svd_split_two_site(theta, max_bond);
+        return svd_split_two_site(theta, max_bond, false);
     }
     let mut mat = vec![Complex64::new(0.0, 0.0); rows * cols];
     for a in 0..dl {
@@ -855,7 +932,7 @@ fn split_theta(
     if let Some(pair) = split {
         return Ok(pair);
     }
-    svd_split_two_site(theta, max_bond)
+    svd_split_two_site(theta, max_bond, false)
 }
 
 fn rsvd_sites(
@@ -1003,6 +1080,7 @@ fn truncated_svd_split(
     max_bond: usize,
     left_dim: usize,
     right_dim: usize,
+    reject_truncation: bool,
 ) -> Result<(Array3<Complex64>, Array3<Complex64>), EngineError> {
     let rows = mat.nrows();
     let cols = mat.ncols();
@@ -1010,6 +1088,14 @@ fn truncated_svd_split(
     let singular = svd.singular_values;
     let values: Vec<f64> = singular.iter().copied().collect();
     let chi = super::svd_guard::retained_chi(&values, max_bond, rows, cols);
+    if reject_truncation
+        && values
+            .iter()
+            .skip(chi)
+            .any(|s| *s > super::svd_guard::SINGULAR_CUTOFF)
+    {
+        return Err(EngineError::ExecutionFailed("mps bond exceeded chi".into()));
+    }
 
     let u = svd
         .u
@@ -1050,6 +1136,7 @@ fn tdg_matrix() -> [[Complex64; 2]; 2] {
 fn svd_split_two_site(
     theta: Array4<Complex64>,
     max_bond: usize,
+    reject_truncation: bool,
 ) -> Result<(Array3<Complex64>, Array3<Complex64>), EngineError> {
     let (dl, _, _, dr) = theta.dim();
     let rows = dl * 2;
@@ -1064,7 +1151,280 @@ fn svd_split_two_site(
             }
         }
     }
-    truncated_svd_split(mat, max_bond, dl, dr)
+    truncated_svd_split(mat, max_bond, dl, dr, reject_truncation)
+}
+
+fn adjoint_mat2(u: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+    [
+        [u[0][0].conj(), u[1][0].conj()],
+        [u[0][1].conj(), u[1][1].conj()],
+    ]
+}
+
+fn adjoint_mat4(u: &Mat4) -> Mat4 {
+    let z = Complex64::new(0.0, 0.0);
+    let mut out = [[[[z; 2]; 2]; 2]; 2];
+    for c_out in 0..2 {
+        for t_out in 0..2 {
+            for c_in in 0..2 {
+                for t_in in 0..2 {
+                    out[c_out][t_out][c_in][t_in] = u[c_in][t_in][c_out][t_out].conj();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Work-report mark: both half sweeps are in the unitary AIR. The overlap is
+/// a separate transcript tail (claimed MPS tensors → amplitude), not an AIR
+/// row on the half sweeps. Informational on the node: the orchestrator
+/// overwrites from `MpsTimeSplit`.
+pub const PROOF_SCOPE_TIME_SPLIT_HALVES: &str = "mps_time_split_halves";
+/// Work-report mark: only the first half is in the unitary AIR (second half
+/// has a gate with no Gate-level adjoint expansion, e.g. MEASURE). Overlap
+/// still ships as a separate tail when the path emits one.
+pub const PROOF_SCOPE_TIME_SPLIT_FIRST_HALF: &str = "mps_time_split_first_half";
+
+/// `<0|U|0>` as an overlap of two MPS.
+///
+/// `|ψ⟩ = U_first|0⟩` uses `gates[..split]`. `|φ⟩ = U_second†|0⟩` uses the
+/// adjoint of `gates[split..]` in reverse. The scalar is `⟨φ|ψ⟩`. A half whose
+/// bond would pass `max_bond`, or an overlap environment wider than
+/// [`OVERLAP_ENV_LIMIT`], is an error. Nothing is truncated.
+pub fn contract_time_split(
+    qubit_count: usize,
+    gates: &[Gate],
+    split: usize,
+    max_bond: usize,
+) -> Result<Complex64, EngineError> {
+    let (ket, bra) = time_split_boundaries(qubit_count, gates, split, max_bond)?;
+    overlap(&ket, &bra)
+}
+
+/// Same as [`contract_time_split`], plus an AIR trace for the half sweeps.
+///
+/// Returns the ket/bra MPS so the caller can emit an [`OverlapSegment`]
+/// binding the tensors to the published amplitude. When every gate in the
+/// second half has a Gate-level adjoint sequence, both halves are traced and
+/// the scope is [`PROOF_SCOPE_TIME_SPLIT_HALVES`]. Otherwise only the first
+/// half is traced ([`PROOF_SCOPE_TIME_SPLIT_FIRST_HALF`]).
+pub fn contract_time_split_with_trace(
+    qubit_count: usize,
+    gates: &[Gate],
+    split: usize,
+    max_bond: usize,
+) -> Result<(Complex64, Vec<f64>, &'static str, MpsState, MpsState), EngineError> {
+    if split > gates.len() {
+        return Err(EngineError::ExecutionFailed(
+            "time-split index past the gate list".into(),
+        ));
+    }
+    let mut ket = MpsState::try_new_with_bond(qubit_count, max_bond)?;
+    ket.reject_truncation = true;
+    let mut trace = super::trace::execute_with_trace(qubit_count, &gates[..split], &mut ket)?;
+
+    let mut bra = MpsState::try_new_with_bond(qubit_count, max_bond)?;
+    bra.reject_truncation = true;
+    let scope = if let Some(bra_gates) = bra_unitary_gates(&gates[split..]) {
+        let bra_trace = super::trace::execute_with_trace(qubit_count, &bra_gates, &mut bra)?;
+        trace.extend(bra_trace);
+        PROOF_SCOPE_TIME_SPLIT_HALVES
+    } else {
+        apply_second_half_adjoint(&mut bra, &gates[split..])?;
+        PROOF_SCOPE_TIME_SPLIT_FIRST_HALF
+    };
+    let amp = overlap(&ket, &bra)?;
+    Ok((amp, trace, scope, ket, bra))
+}
+
+/// Build an overlap STARK witness from the time-split ket/bra MPS and snapped amplitude.
+pub fn build_overlap_segment(
+    ket: &MpsState,
+    bra: &MpsState,
+    amplitude: &crate::engine::ComplexResult,
+) -> Result<wqc_stark_engine::OverlapSegment, EngineError> {
+    use wqc_stark_engine::{
+        calculate_amplitude_digest, OverlapSegment, OVERLAP_ENV_LIMIT, OVERLAP_MAX_BOND,
+    };
+
+    if ket.qubit_count != bra.qubit_count {
+        return Err(EngineError::MismatchedRegister);
+    }
+    let n = ket.qubit_count;
+    let mut ket_sites = Vec::with_capacity(n);
+    let mut bra_sites = Vec::with_capacity(n);
+    for site in 0..n {
+        let kt = &ket.sites[site];
+        let bt = &bra.sites[site];
+        let (k_left, k_phys, k_right) = kt.dim();
+        let (b_left, b_phys, b_right) = bt.dim();
+        if k_phys != 2 || b_phys != 2 {
+            return Err(EngineError::ExecutionFailed(
+                "mps site physical dim must be 2".into(),
+            ));
+        }
+        if k_left > OVERLAP_MAX_BOND
+            || k_right > OVERLAP_MAX_BOND
+            || b_left > OVERLAP_MAX_BOND
+            || b_right > OVERLAP_MAX_BOND
+        {
+            return Err(EngineError::ExecutionFailed(
+                "mps overlap site bond exceeds STARK witness limit 16".into(),
+            ));
+        }
+        if k_right.saturating_mul(b_right) > OVERLAP_ENV_LIMIT {
+            return Err(EngineError::ExecutionFailed(
+                "mps overlap environment exceeds 256".into(),
+            ));
+        }
+        ket_sites.push(site_to_overlap_tensor(kt));
+        bra_sites.push(site_to_overlap_tensor(bt));
+    }
+    Ok(OverlapSegment {
+        qubit_count: n as u32,
+        amplitude_re: amplitude.real,
+        amplitude_im: amplitude.imag,
+        amplitude_digest: calculate_amplitude_digest(amplitude.real, amplitude.imag),
+        ket_sites,
+        bra_sites,
+    })
+}
+
+fn site_to_overlap_tensor(site: &Array3<Complex64>) -> wqc_stark_engine::OverlapSiteTensor {
+    let (left, phys, right) = site.dim();
+    let mut values = Vec::with_capacity(left * phys * right);
+    for a in 0..left {
+        for s in 0..phys {
+            for b in 0..right {
+                let c = site[[a, s, b]];
+                values.push((c.re, c.im));
+            }
+        }
+    }
+    wqc_stark_engine::OverlapSiteTensor {
+        left_dim: left as u32,
+        right_dim: right as u32,
+        values,
+    }
+}
+
+fn time_split_boundaries(
+    qubit_count: usize,
+    gates: &[Gate],
+    split: usize,
+    max_bond: usize,
+) -> Result<(MpsState, MpsState), EngineError> {
+    if split > gates.len() {
+        return Err(EngineError::ExecutionFailed(
+            "time-split index past the gate list".into(),
+        ));
+    }
+    let mut ket = MpsState::try_new_with_bond(qubit_count, max_bond)?;
+    ket.reject_truncation = true;
+    for gate in &gates[..split] {
+        ket.apply_gate(gate)?;
+    }
+    let mut bra = MpsState::try_new_with_bond(qubit_count, max_bond)?;
+    bra.reject_truncation = true;
+    if let Some(bra_gates) = bra_unitary_gates(&gates[split..]) {
+        for gate in &bra_gates {
+            bra.apply_gate(gate)?;
+        }
+    } else {
+        apply_second_half_adjoint(&mut bra, &gates[split..])?;
+    }
+    Ok((ket, bra))
+}
+
+fn apply_second_half_adjoint(bra: &mut MpsState, second_half: &[Gate]) -> Result<(), EngineError> {
+    for gate in second_half.iter().rev() {
+        bra.apply_gate_adjoint(gate)?;
+    }
+    Ok(())
+}
+
+/// Adjoint of `second_half` in reverse, as Gate ops the AIR already knows.
+fn bra_unitary_gates(second_half: &[Gate]) -> Option<Vec<Gate>> {
+    let mut out = Vec::new();
+    for gate in second_half.iter().rev() {
+        out.extend(adjoint_gate_sequence(gate)?);
+    }
+    Some(out)
+}
+
+fn adjoint_gate_sequence(gate: &Gate) -> Option<Vec<Gate>> {
+    match gate {
+        Gate::H(t) => Some(vec![Gate::H(*t)]),
+        Gate::X(t) => Some(vec![Gate::X(*t)]),
+        Gate::Y(t) => Some(vec![Gate::Y(*t)]),
+        Gate::Z(t) => Some(vec![Gate::Z(*t)]),
+        Gate::CNOT(c, t) => Some(vec![Gate::CNOT(*c, *t)]),
+        Gate::CZ(c, t) => Some(vec![Gate::CZ(*c, *t)]),
+        Gate::CCNOT(c1, c2, t) => Some(vec![Gate::CCNOT(*c1, *c2, *t)]),
+        Gate::RX(t, th) => Some(vec![Gate::RX(*t, -*th)]),
+        Gate::RY(t, th) => Some(vec![Gate::RY(*t, -*th)]),
+        Gate::RZ(t, th) => Some(vec![Gate::RZ(*t, -*th)]),
+        // S† = S·Z. T† = T³·Z. No dagger variants on Gate.
+        Gate::S(t) => Some(vec![Gate::S(*t), Gate::Z(*t)]),
+        Gate::T(t) => Some(vec![Gate::T(*t), Gate::T(*t), Gate::T(*t), Gate::Z(*t)]),
+        Gate::MEASURE(_) | Gate::RESET(_) | Gate::IF(_) => None,
+    }
+}
+
+fn overlap(ket: &MpsState, bra: &MpsState) -> Result<Complex64, EngineError> {
+    if ket.qubit_count != bra.qubit_count {
+        return Err(EngineError::MismatchedRegister);
+    }
+    let mut env = vec![Complex64::ONE];
+    let mut ket_left = 1usize;
+    let mut bra_left = 1usize;
+    for site in 0..ket.qubit_count {
+        let kt = &ket.sites[site];
+        let bt = &bra.sites[site];
+        let (k_left, _, k_right) = kt.dim();
+        let (b_left, phys, bra_right) = bt.dim();
+        if k_left != ket_left || b_left != bra_left || phys != 2 {
+            return Err(EngineError::ExecutionFailed(
+                "mps site shape does not match the overlap".into(),
+            ));
+        }
+        let env_dim = k_right.saturating_mul(bra_right);
+        if env_dim > OVERLAP_ENV_LIMIT {
+            return Err(EngineError::ExecutionFailed(
+                "mps overlap environment exceeds 256".into(),
+            ));
+        }
+        let mut next = vec![Complex64::new(0.0, 0.0); env_dim];
+        for a in 0..k_left {
+            for b in 0..b_left {
+                let coeff = env[a * bra_left + b];
+                if coeff.norm_sqr() == 0.0 {
+                    continue;
+                }
+                for s in 0..2 {
+                    for a_right in 0..k_right {
+                        let kv = coeff * kt[[a, s, a_right]];
+                        if kv.norm_sqr() == 0.0 {
+                            continue;
+                        }
+                        for b_out in 0..bra_right {
+                            next[a_right * bra_right + b_out] += kv * bt[[b, s, b_out]].conj();
+                        }
+                    }
+                }
+            }
+        }
+        env = next;
+        ket_left = k_right;
+        bra_left = bra_right;
+    }
+    if env.len() != 1 {
+        return Err(EngineError::ExecutionFailed(
+            "mps overlap left an open bond".into(),
+        ));
+    }
+    Ok(env[0])
 }
 
 #[cfg(test)]
@@ -1104,6 +1464,263 @@ mod tests {
         };
         assert!((dense[0].re - expected.re).abs() < 1e-6);
         assert!((dense[0].im - expected.im).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nonadjacent_two_qubit_gates_match_dense_statevector() {
+        // Gates that are not neighbors on the MPS path. The zero amplitude
+        // alone stays 1/sqrt(2) even if a swap is applied to the wrong pair.
+        let gates = vec![
+            Gate::H(0),
+            Gate::H(1),
+            Gate::CNOT(0, 2),
+            Gate::CZ(3, 1),
+            Gate::CNOT(2, 0),
+        ];
+        let chi = exact_bond_dim(4);
+        let mut mps = MpsState::try_new_with_bond(4, chi).expect("mps");
+        for g in &gates {
+            mps.apply_gate(g).expect("apply");
+        }
+        let mut dense = crate::tn::dense::DenseTnState::try_new(4).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        let got = mps.to_dense_state();
+        assert_eq!(got.len(), dense.state.len());
+        for (i, (x, y)) in got.iter().zip(dense.state.iter()).enumerate() {
+            assert!((x - y).norm() < 1e-8, "amp[{i}] mps={x} dense={y}");
+        }
+    }
+
+    fn ry_cnot_brickwork(n: usize, depth: usize) -> (Vec<Gate>, usize) {
+        let mut gates = Vec::new();
+        let mut split = 0usize;
+        for layer in 0..depth {
+            if layer == depth / 2 {
+                split = gates.len();
+            }
+            for q in 0..n {
+                gates.push(Gate::RY(q, 0.17 + 0.01 * (q + layer) as f64));
+            }
+            let mut q = layer % 2;
+            while q + 1 < n {
+                gates.push(Gate::CNOT(q, q + 1));
+                q += 2;
+            }
+        }
+        (gates, split)
+    }
+
+    #[test]
+    fn time_split_hadamard_matches_dense() {
+        let gates = vec![Gate::H(0), Gate::S(0), Gate::RZ(0, 0.4)];
+        let got = contract_time_split(1, &gates, 2, 128).expect("split");
+        let mut dense = crate::tn::dense::DenseTnState::try_new(1).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        assert!(
+            (got - dense.state[0]).norm() < 1e-8,
+            "{got} vs {}",
+            dense.state[0]
+        );
+    }
+
+    #[test]
+    fn time_split_brickwork_matches_dense() {
+        // 12 qubits caps the middle cut at 2^6 = 64, so one χ=128 sweep is
+        // already exact. 16 qubits leaves 8 sites on each side of that cut.
+        // CNOT brickwork on |+⟩ stays a product state, so each layer also
+        // rotates. Eight layers a side keep the bond at 16. The full depth
+        // needs 256 and must not be truncated down to 128.
+        let n = 16usize;
+        let (gates, split) = ry_cnot_brickwork(n, 16);
+        let got = contract_time_split(n, &gates, split, 128).expect("split");
+        let mut dense = crate::tn::dense::DenseTnState::try_new(n).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        assert!(
+            (got - dense.state[0]).norm() < 1e-8,
+            "{got} vs {}",
+            dense.state[0]
+        );
+        let err = contract_time_split(n, &gates, gates.len(), 128);
+        assert!(err.is_err(), "one sweep of bond 256 must not truncate");
+    }
+
+    #[test]
+    fn time_split_proof_scope_marks_halves_for_cnot() {
+        // Keep this tiny: execute_with_trace on a 16q depth-16 half is minutes
+        // in debug. The dense match above covers the amplitude path.
+        let gates = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RY(1, 0.3)];
+        let (_, _, scope, _, _) =
+            contract_time_split_with_trace(2, &gates, 2, 128).expect("traced");
+        assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
+    }
+
+    #[test]
+    fn time_split_with_trace_matches_plain_on_wide_shallow() {
+        // n>16 takes the disjoint-layer path inside execute_with_trace. The
+        // plain path does not. Amplitudes must still agree.
+        let n = 18usize;
+        let (gates, split) = ry_cnot_brickwork(n, 4);
+        let plain = contract_time_split(n, &gates, split, 128).expect("plain");
+        let (traced, _, scope, _, _) =
+            contract_time_split_with_trace(n, &gates, split, 128).expect("traced");
+        assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
+        assert!(
+            (plain - traced).norm() < 1e-8,
+            "plain={plain} traced={traced}"
+        );
+    }
+
+    #[test]
+    fn overlap_rejects_environment_above_256() {
+        let ket = forced_bond_mps(3, 17);
+        let bra = forced_bond_mps(3, 17);
+        let err = overlap(&ket, &bra).expect_err("17×17 environment");
+        assert!(err.to_string().contains("256"), "unexpected error: {err}");
+    }
+
+    fn forced_bond_mps(n: usize, bond: usize) -> MpsState {
+        let mut m = MpsState::try_new_with_bond(n, bond.max(32)).expect("mps");
+        m.reject_truncation = true;
+        for i in 0..n {
+            let left = if i == 0 { 1 } else { bond };
+            let right = if i + 1 == n { 1 } else { bond };
+            let mut t = Array3::zeros((left, 2, right));
+            let scale = Complex64::new(1.0 / (left as f64).sqrt(), 0.0);
+            for a in 0..left {
+                t[[a, 0, a.min(right - 1)]] = scale;
+            }
+            m.sites[i] = t;
+        }
+        m
+    }
+
+    #[test]
+    fn long_range_on_width16_half_rejects_at_chi16() {
+        // Final cutwidth 16 plus a far CNOT. Swaps along the path push the
+        // bond past 16; reject_truncation must error instead of truncating.
+        let n = 16usize;
+        let (mut gates, _) = ry_cnot_brickwork(n, 8);
+        gates.push(Gate::CNOT(0, n - 1));
+        let err = contract_time_split(n, &gates, gates.len(), 16);
+        assert!(
+            err.is_err(),
+            "swap along a width-16 cut must not truncate under chi 16"
+        );
+    }
+
+    #[test]
+    fn long_range_on_width8_half_matches_dense_at_chi16() {
+        // Depth 6 is final width 8. Chi 16 leaves room for the long-range
+        // swaps, which is the margin TimeSplitPlan keeps.
+        let n = 16usize;
+        let (mut gates, _) = ry_cnot_brickwork(n, 6);
+        gates.push(Gate::CNOT(0, n - 1));
+        let got = contract_time_split(n, &gates, gates.len(), 16).expect("swap headroom");
+        let mut dense = crate::tn::dense::DenseTnState::try_new(n).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        assert!(
+            (got - dense.state[0]).norm() < 1e-8,
+            "{got} vs {}",
+            dense.state[0]
+        );
+    }
+
+    #[test]
+    fn time_split_with_s_and_t_keeps_halves_proof_scope() {
+        let gates = vec![Gate::H(0), Gate::S(0), Gate::T(0)];
+        let plain = contract_time_split(1, &gates, 1, 128).expect("plain");
+        let (traced, _, scope, _, _) =
+            contract_time_split_with_trace(1, &gates, 1, 128).expect("traced");
+        assert_eq!(scope, PROOF_SCOPE_TIME_SPLIT_HALVES);
+        assert!((plain - traced).norm() < 1e-8, "{plain} vs {traced}");
+        let mut dense = crate::tn::dense::DenseTnState::try_new(1).expect("dense");
+        for g in &gates {
+            dense.apply_gate(g);
+        }
+        assert!((plain - dense.state[0]).norm() < 1e-8);
+    }
+
+    #[test]
+    fn overlap_segment_from_time_split_verifies_and_rejects_tamper() {
+        use wqc_stark_engine::verify_overlap_segment;
+
+        let gates = vec![Gate::H(0), Gate::S(0), Gate::RZ(0, 0.4)];
+        let (amp, _, _, ket, bra) =
+            contract_time_split_with_trace(1, &gates, 2, 16).expect("traced");
+        let snapped = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+            real: amp.re,
+            imag: amp.im,
+        });
+        let segment = build_overlap_segment(&ket, &bra, &snapped).expect("segment");
+        assert!(verify_overlap_segment(&segment));
+
+        let mut bad = segment.clone();
+        bad.amplitude_re = 0.0;
+        bad.amplitude_digest =
+            wqc_stark_engine::calculate_amplitude_digest(bad.amplitude_re, bad.amplitude_im);
+        assert!(!verify_overlap_segment(&bad));
+
+        let cnot = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::RY(1, 0.25)];
+        let (amp2, _, _, ket2, bra2) =
+            contract_time_split_with_trace(2, &cnot, 2, 16).expect("cnot");
+        let snapped2 = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+            real: amp2.re,
+            imag: amp2.im,
+        });
+        let seg2 = build_overlap_segment(&ket2, &bra2, &snapped2).expect("cnot segment");
+        assert!(verify_overlap_segment(&seg2));
+    }
+
+    #[test]
+    fn overlap_segment_brickwork_nontrivial_amplitude_verifies() {
+        // Regression for M31 1e-4 snap vs 1e-5 eps: honest RY+CNOT splits with
+        // O(1) amplitude must verify. Depth-6 midpoint on 4–12q is enough.
+        use wqc_stark_engine::verify_overlap_segment;
+
+        for n in [4usize, 8, 12] {
+            let (gates, split) = ry_cnot_brickwork(n, 6);
+            assert!(split > 0 && split < gates.len(), "n={n} split={split}");
+            let (amp, _, _, ket, bra) =
+                contract_time_split_with_trace(n, &gates, split, 16).expect("traced");
+            assert!(
+                amp.norm() > 1e-3,
+                "n={n}: need nontrivial amplitude, got {amp}"
+            );
+            let snapped = crate::engine::snap_complex_result(crate::engine::ComplexResult {
+                real: amp.re,
+                imag: amp.im,
+            });
+            let segment = build_overlap_segment(&ket, &bra, &snapped).expect("segment");
+            assert!(
+                verify_overlap_segment(&segment),
+                "n={n} amp=({}, {})",
+                snapped.real,
+                snapped.imag
+            );
+        }
+    }
+
+    #[test]
+    fn build_overlap_segment_rejects_env_above_256() {
+        let ket = forced_bond_mps(3, 17);
+        let bra = forced_bond_mps(3, 17);
+        let zero = crate::engine::ComplexResult {
+            real: 0.0,
+            imag: 0.0,
+        };
+        let err = build_overlap_segment(&ket, &bra, &zero).expect_err("bond 17");
+        assert!(
+            err.to_string().contains("16") || err.to_string().contains("256"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -1188,5 +1805,40 @@ mod tests {
             }
         }
         assert!(err < 1e-6, "rebuild err {err}");
+    }
+
+    #[test]
+    fn mps_accepts_registers_above_40_qubits() {
+        assert!(MpsState::try_new_with_bond(0, 8).is_err());
+        assert!(MpsState::try_new_with_bond(41, 8).is_ok());
+        assert!(MpsState::try_new_with_bond(100, 128).is_ok());
+    }
+
+    #[test]
+    fn statevector_projection_still_rejects_above_20() {
+        let mps = MpsState::try_new_with_bond(21, 4).expect("mps");
+        let err = mps.contract_to_statevector().expect_err("21q statevector");
+        assert!(err.to_string().contains("qubit_count <= 20"));
+    }
+
+    #[test]
+    fn mps_workspace_over_host_budget_is_insufficient_memory() {
+        let required = mps_workspace_bytes(100, 128);
+        assert_eq!(required, 52_428_800);
+        let total = 8 * 1024 * 1024 * 1024;
+        let budget = max_wqc_memory_bytes_from_total(total);
+        assert!(required < budget);
+        assert!(ensure_mps_workspace_budget(required, total).is_ok());
+        let err = ensure_mps_workspace_budget(budget + 1, total).expect_err("over budget");
+        match err {
+            EngineError::InsufficientMemory {
+                required,
+                available,
+            } => {
+                assert_eq!(required, budget + 1);
+                assert_eq!(available, budget);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

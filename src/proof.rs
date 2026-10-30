@@ -3,11 +3,12 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use wqc_stark_engine::{
-    append_born_stark_tail, append_distribution_tail, append_trajectory_stark_tail,
-    append_trajectory_tail, compose_unitary_born_leaf, compose_unitary_trajectory_leaf,
-    generate_born_stark_proof, generate_plonky3_stark_proof, generate_trajectory_stark_bundle,
-    segment_supports_born_zk, segment_supports_trajectory_zk, verify_stark_proof_core,
-    BornStarkContext, DistributionSegment, StarkContext as EngineContext, TrajectorySegment,
+    append_born_stark_tail, append_distribution_tail, append_overlap_tail,
+    append_trajectory_stark_tail, append_trajectory_tail, compose_unitary_born_leaf,
+    compose_unitary_trajectory_leaf, generate_born_stark_proof, generate_plonky3_stark_proof,
+    generate_trajectory_stark_bundle, segment_supports_born_zk, segment_supports_trajectory_zk,
+    verify_stark_proof_core, BornStarkContext, DistributionSegment, OverlapSegment,
+    StarkContext as EngineContext, TrajectorySegment,
 };
 
 /// Vision: the proof is the anchor of trust in a decentralized computer.
@@ -63,6 +64,7 @@ impl StarkProver {
         execution_trace: &[f64],
         distribution: Option<&DistributionSegment>,
         trajectory: Option<&TrajectorySegment>,
+        overlap: Option<&OverlapSegment>,
         security_level: &str,
     ) -> Result<Proof, String> {
         if execution_trace.is_empty() {
@@ -147,6 +149,18 @@ impl StarkProver {
                     proof_bytes = append_trajectory_stark_tail(proof_bytes, &bundle);
                 }
             }
+        }
+
+        if let Some(segment) = overlap {
+            if segment.amplitude_digest != output_hash {
+                return Err(
+                    "overlap amplitude_digest does not match output_result_hash".to_string()
+                );
+            }
+            if !wqc_stark_engine::verify_overlap_segment(segment) {
+                return Err("overlap segment failed AIR verification before prove".to_string());
+            }
+            proof_bytes = append_overlap_tail(proof_bytes, segment);
         }
 
         let stark_proof_b64 = general_purpose::STANDARD.encode(&proof_bytes);
@@ -244,6 +258,7 @@ mod integration_tests {
                 &trace,
                 None,
                 None,
+                None,
                 "",
             )
             .expect("proof");
@@ -276,6 +291,7 @@ mod integration_tests {
                 "0",
                 &output_hash,
                 &trace,
+                None,
                 None,
                 None,
                 "",
@@ -333,6 +349,7 @@ mod integration_tests {
                 &output_hash,
                 &trace,
                 Some(&distribution),
+                None,
                 None,
                 "",
             )
@@ -406,6 +423,7 @@ mod integration_tests {
                 &execution_trace,
                 None,
                 Some(&trajectory),
+                None,
                 "",
             )
             .expect("composed proof");
@@ -463,6 +481,7 @@ mod integration_tests {
                 &execution_trace,
                 None,
                 Some(&trajectory),
+                None,
                 "",
             )
             .expect("proof");

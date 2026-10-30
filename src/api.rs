@@ -61,6 +61,9 @@ pub struct ComputeTask {
     /// Optional MPS path: `site_order[site] = logical` compact qubit (identity if absent/empty).
     #[serde(default)]
     pub mps_site_order: Option<Vec<usize>>,
+    /// Gate index that splits a scalar into two MPS sweeps. Absent means one sweep.
+    #[serde(default)]
+    pub mps_time_split: Option<usize>,
     /// Result mode (default: contracted scalar amplitude).
     #[serde(default)]
     pub output_mode: OutputMode,
@@ -114,6 +117,12 @@ pub struct WorkReport {
     pub tn_backend: String,
     #[serde(default)]
     pub vram_peak_bytes: u64,
+    /// Empty for a full unitary sweep. Time-split scalars set
+    /// `mps_time_split_halves` or `mps_time_split_first_half` here as a hint
+    /// (which half sweeps are in the unitary AIR). Overlap is a separate
+    /// proof tail. The orchestrator overwrites from its own `MpsTimeSplit`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proof_scope: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,19 +297,65 @@ pub async fn handle_compute(
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Step 2: Tensor-network contraction with slice boundary conditions (unitary gates only).
-    let network = TensorNetwork::from_parts(
-        task.qubit_count,
-        unitary_gates.clone(),
-        task.slice_assignments,
-    )
-    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
     let compute_start = std::time::Instant::now();
-    let (complex_result, execution_trace) = network
-        .contract(&mut workspace)
+    let mut proof_scope = String::new();
+    let mut overlap_ket_bra: Option<(crate::tn::MpsState, crate::tn::MpsState)> = None;
+    let (complex_result, execution_trace) = if let Some(split) = task.mps_time_split {
+        if task.output_mode != OutputMode::StatevectorScalar {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "mps_time_split is only valid for a scalar".into(),
+            ));
+        }
+        if !task.slice_assignments.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "mps_time_split does not take slice assignments".into(),
+            ));
+        }
+        if split == 0 || split > unitary_gates.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "mps_time_split is outside the gate list".into(),
+            ));
+        }
+        let chi = crate::tn::resolve_bond_dim(task.mps_max_bond_dim);
+        let (amp, trace, scope, ket, bra) = crate::tn::mps::contract_time_split_with_trace(
+            task.qubit_count,
+            &unitary_gates,
+            split,
+            chi,
+        )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        proof_scope = scope.to_string();
+        overlap_ket_bra = Some((ket, bra));
+        (
+            crate::engine::ComplexResult {
+                real: amp.re,
+                imag: amp.im,
+            },
+            trace,
+        )
+    } else {
+        let network = TensorNetwork::from_parts(
+            task.qubit_count,
+            unitary_gates.clone(),
+            task.slice_assignments,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        network
+            .contract(&mut workspace)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
     let complex_result = snap_complex_result(complex_result);
+    let overlap_segment = if let Some((ket, bra)) = overlap_ket_bra.as_ref() {
+        Some(
+            crate::tn::mps::build_overlap_segment(ket, bra, &complex_result)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let (sample_result, mid_circuit_trace) = if task.output_mode == OutputMode::SampleCounts {
         let classical_bit_count = task.classical_bit_count.unwrap_or(0);
@@ -418,6 +473,7 @@ pub async fn handle_compute(
             &execution_trace,
             distribution_segment.as_ref(),
             trajectory_segment.as_ref(),
+            overlap_segment.as_ref(),
             &task.security_level,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -468,6 +524,7 @@ pub async fn handle_compute(
             proof_bytes,
             tn_backend: workspace.tn_backend_label().to_string(),
             vram_peak_bytes: workspace.peak_vram_bytes(),
+            proof_scope,
         },
         distribution_proof: Some(
             if trajectory_segment.as_ref().is_some_and(|s| {
