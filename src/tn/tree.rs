@@ -1,17 +1,21 @@
-//! Sweep contraction tree for `statevector_scalar`.
+//! Contraction tree for `statevector_scalar`.
 //!
-//! A leaf is an input `|0⟩` or one parent-circuit gate. Each internal node is
-//! one step of the MPS sweep along `site_order` (empty means identity):
-//! a one-qubit gate replaces that wire's site tensor, and a two-qubit gate
-//! swaps sites until the two wires are adjacent, merges them, applies the
-//! gate, splits them back into two site tensors, then undoes the swaps.
+//! A sweep tree is one step of the MPS sweep along `site_order` (empty means
+//! identity). A one-qubit gate replaces that wire's site tensor. A two-qubit
+//! gate swaps sites until the two wires are adjacent, merges them, applies
+//! the gate, splits them back into two site tensors, then undoes the swaps.
+//! [`contract_tree`] replays those nodes on the bond-truncated MPS. The STARK
+//! trace is the same sweep trace as [`super::contract::contract_slice`].
+//!
+//! An exact tree is a list of `Contract` nodes plus `peak_bytes`. Each node
+//! contracts two tensors and the result replaces both. Open legs stay dense:
+//! there is no SVD and no bond cut. One tensor may have at most 26 legs
+//! (`2^26 × 16` = 1 GiB). The declared peak is the maximum sum of live state
+//! tensors and must match the walk. The unitary AIR is not extended to this
+//! walk; the trace returned with an exact amplitude is still the sweep trace.
+//!
 //! Wire numbers stay the parent circuit's. A wire no gate touches stays
-//! `Ket0` and has no node; the sweep still keeps its site at `|0⟩`.
-//!
-//! [`contract_tree`] replays those nodes. It rejects every other shape. The
-//! STARK trace is the same sweep trace as [`super::contract::contract_slice`],
-//! including an even run of H, a net rotation, and a disjoint adjacent layer.
-//! The call has no slice assignments. A task with no tree stays on
+//! `|0⟩`. The call has no slice assignments. A task with no tree stays on
 //! `contract_slice`.
 
 use std::ops::Range;
@@ -24,13 +28,16 @@ use super::mps::MpsState;
 use super::site_order::{logical_to_site_map, remap_gates, validate_site_order};
 use super::trace::{execute_with_trace_using, TraceStep};
 
-/// Operand of a sweep step: an input `|0⟩`, or one factor of an earlier node.
+/// Operand of a node: an input `|0⟩`, a gate, or one factor of an earlier node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TensorRef {
     /// `|0⟩` on a parent-circuit wire.
     Ket0(u32),
-    /// The site tensor written by unary node `nodes[i]`.
+    /// Unitary gate `gates[i]`. Exact trees only.
+    Gate(u32),
+    /// The site tensor written by unary node `nodes[i]`, or the exact
+    /// contraction `nodes[i]`.
     Node(u32),
     /// Left site after swap or pair node `nodes[i]`.
     Left(u32),
@@ -78,16 +85,25 @@ pub enum ContractionNode {
         gate: u32,
         ctrl_on_left: bool,
     },
+    /// Exact contraction. The result replaces both operands. No SVD.
+    Contract {
+        left: TensorRef,
+        right: TensorRef,
+    },
 }
 
-/// Sweep tree plus the MPS path the nodes were built on.
+/// Sweep tree, or an exact contraction with its declared live-tensor peak.
 ///
-/// An empty `site_order` is the identity `0..qubit_count`.
+/// An empty `site_order` is the identity `0..qubit_count`. `peak_bytes` is
+/// set only on an exact tree. One state tensor is `16 << open_legs` bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractionTree {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub site_order: Vec<u32>,
     pub nodes: Vec<ContractionNode>,
+    /// Maximum sum of live state tensors. Absent on a sweep tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_bytes: Option<u64>,
 }
 
 /// Checks that sit in front of [`contract_tree`] on the compute path.
@@ -140,13 +156,75 @@ pub fn validate_sweep_dispatch(dispatch: &SweepDispatch<'_>) -> Result<(), Engin
             "contraction_tree keeps the parent register".into(),
         ));
     }
-    prepare(
-        dispatch.qubit_count,
-        dispatch.gates,
-        dispatch.tree,
-        dispatch.mps_site_order,
-    )?;
+    match tree_kind(dispatch.tree)? {
+        TreeKind::Sweep => {
+            prepare(
+                dispatch.qubit_count,
+                dispatch.gates,
+                dispatch.tree,
+                dispatch.mps_site_order,
+            )?;
+        }
+        TreeKind::Exact => {
+            super::exact::validate(
+                dispatch.qubit_count,
+                dispatch.gates,
+                dispatch.tree,
+                dispatch.mps_site_order,
+            )?;
+        }
+    }
     Ok(())
+}
+
+enum TreeKind {
+    Sweep,
+    Exact,
+}
+
+/// Tree-shape and budget failures are the caller's tree, so the compute path
+/// answers HTTP 400. An MPS failure during the sweep trace stays 500.
+pub fn is_contraction_client_error(err: &EngineError) -> bool {
+    match err {
+        EngineError::InvalidQubitCount(_) | EngineError::QubitIndexOutOfBounds { .. } => true,
+        EngineError::ExecutionFailed(msg) => {
+            msg.starts_with("contraction tree")
+                || msg.starts_with("contraction_tree")
+                || msg.starts_with("exact contraction")
+                || msg.starts_with("mps sweep")
+                || msg.starts_with("mps_site_order")
+                || msg.starts_with("gate ")
+                || msg.starts_with("gates ")
+                || msg.starts_with("tensors share")
+                || msg.starts_with("qubit index exceeds")
+                || msg.starts_with("IF value")
+        }
+        _ => false,
+    }
+}
+
+fn tree_kind(tree: &ContractionTree) -> Result<TreeKind, EngineError> {
+    let exact = tree
+        .nodes
+        .iter()
+        .any(|node| matches!(node, ContractionNode::Contract { .. }));
+    let sweep = tree
+        .nodes
+        .iter()
+        .any(|node| !matches!(node, ContractionNode::Contract { .. }));
+    match (exact, sweep, tree.peak_bytes.is_some()) {
+        (false, _, false) => Ok(TreeKind::Sweep),
+        (false, true, true) => Err(EngineError::ExecutionFailed(
+            "mps sweep does not declare a peak".into(),
+        )),
+        (true, true, _) => Err(EngineError::ExecutionFailed(
+            "contraction tree mixes sweep steps and exact contractions".into(),
+        )),
+        (true, false, false) => Err(EngineError::ExecutionFailed(
+            "exact contraction tree requires a peak".into(),
+        )),
+        (_, false, true) => Ok(TreeKind::Exact),
+    }
 }
 
 /// `⟨0…0|ψ⟩` and the same STARK trace the sweep emits today.
@@ -157,6 +235,22 @@ pub fn contract_tree(
     mps_site_order: Option<&[usize]>,
     state: &mut MpsState,
 ) -> Result<(ComplexResult, Vec<f64>), EngineError> {
+    if matches!(tree_kind(tree)?, TreeKind::Exact) {
+        let amp = super::exact::contract_exact(qubit_count, gates, tree, mps_site_order)?;
+        if state.qubit_count != qubit_count {
+            return Err(EngineError::MismatchedRegister);
+        }
+        // The exact amplitude is not an AIR witness. The trace stays the sweep
+        // so the existing prover still has rows; it does not constrain `amp`.
+        let trace = super::trace::execute_with_trace(qubit_count, gates, state)?;
+        return Ok((
+            ComplexResult {
+                real: amp.re,
+                imag: amp.im,
+            },
+            trace,
+        ));
+    }
     let built = prepare(qubit_count, gates, tree, mps_site_order)?;
     let order: Vec<usize> = expand_order(qubit_count, &built.tree.site_order)
         .into_iter()
@@ -284,6 +378,7 @@ fn build_sweep(
         tree: ContractionTree {
             site_order,
             nodes: build.nodes,
+            peak_bytes: None,
         },
         groups: build.groups,
         wire_at: initial_wires,
@@ -299,7 +394,7 @@ fn expand_order(qubit_count: usize, site_order: &[u32]) -> Vec<u32> {
 }
 
 /// Empty, or an explicit identity, becomes empty. Any other permutation is kept.
-fn canonicalize_site_order(
+pub(crate) fn canonicalize_site_order(
     qubit_count: usize,
     site_order: &[u32],
 ) -> Result<Vec<u32>, EngineError> {
@@ -317,7 +412,7 @@ fn canonicalize_site_order(
 }
 
 /// `None` skips MEASURE, RESET, and IF, matching the sweep's trace loop.
-fn unitary_wires(
+pub(crate) fn unitary_wires(
     gate: &Gate,
     qubit_count: usize,
     gate_index: usize,
@@ -632,6 +727,11 @@ impl<'a> Live<'a> {
                 self.left_wire[index] = Some(wl);
                 self.right_wire[index] = Some(wr);
             }
+            ContractionNode::Contract { .. } => {
+                return Err(EngineError::ExecutionFailed(
+                    "contraction tree is not the mps sweep".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -661,6 +761,7 @@ impl<'a> Live<'a> {
     fn wire_of(&self, tensor: TensorRef) -> Result<u32, EngineError> {
         let wire = match tensor {
             TensorRef::Ket0(wire) => Some(wire),
+            TensorRef::Gate(_) => None,
             TensorRef::Node(index) => self.node_wire.get(index as usize).copied().flatten(),
             TensorRef::Left(index) => self.left_wire.get(index as usize).copied().flatten(),
             TensorRef::Right(index) => self.right_wire.get(index as usize).copied().flatten(),
@@ -811,6 +912,7 @@ mod tests {
         assert!(tree.site_order.is_empty());
         let json = serde_json::to_string(&tree).expect("json");
         assert!(!json.contains("site_order"));
+        assert!(!json.contains("peak_bytes"));
         assert!(json.contains("ket0"));
         let back: ContractionTree = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, tree);

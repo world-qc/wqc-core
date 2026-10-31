@@ -332,7 +332,14 @@ pub async fn handle_compute(
             task.mps_site_order.as_deref(),
             workspace.register_mut(),
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| {
+            let status = if crate::tn::tree::is_contraction_client_error(&e) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, e.to_string())
+        })?
     } else if let Some(split) = task.mps_time_split {
         if task.output_mode != OutputMode::StatevectorScalar {
             return Err((

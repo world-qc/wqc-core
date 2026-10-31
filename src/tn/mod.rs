@@ -8,6 +8,7 @@ pub mod boundary;
 pub mod contract;
 pub mod dense;
 pub mod engine_status;
+mod exact;
 pub mod gates;
 pub mod mps;
 pub mod site_order;
