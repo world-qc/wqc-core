@@ -8,11 +8,15 @@ pub mod boundary;
 pub mod contract;
 pub mod dense;
 pub mod engine_status;
+mod exact;
 pub mod gates;
 pub mod mps;
+#[cfg(test)]
+mod plan;
 pub mod site_order;
 pub mod svd_guard;
 pub mod trace;
+pub mod tree;
 
 #[cfg(feature = "webgpu")]
 pub mod gpu;

@@ -22,12 +22,45 @@ struct AirAmpState {
     subspace: Option<usize>,
 }
 
+/// How one step of the sweep trace applies its gates.
+///
+/// The default step is `apply_gate` / the disjoint-layer product. The sweep
+/// tree passes a step that replays the nodes for that same gate.
+#[derive(Clone, Debug)]
+pub(crate) enum TraceStep {
+    One(usize),
+    /// Rotations `gates[start..start+len]` folded into `net`.
+    Net {
+        start: usize,
+        len: usize,
+        net: Gate,
+    },
+    Layer {
+        start: usize,
+        len: usize,
+    },
+}
+
 /// Gate-by-gate MPS contraction with pre/post trace rows (11-column schema).
 pub fn execute_with_trace(
     qubit_count: usize,
     gates: &[Gate],
     state: &mut MpsState,
 ) -> Result<Vec<f64>, EngineError> {
+    execute_with_trace_using(qubit_count, gates, state, |state, step| {
+        apply_trace_step(state, gates, step)
+    })
+}
+
+pub(crate) fn execute_with_trace_using<F>(
+    qubit_count: usize,
+    gates: &[Gate],
+    state: &mut MpsState,
+    mut apply: F,
+) -> Result<Vec<f64>, EngineError>
+where
+    F: FnMut(&mut MpsState, &TraceStep) -> Result<(), EngineError>,
+{
     if qubit_count != state.qubit_count {
         return Err(EngineError::MismatchedRegister);
     }
@@ -47,11 +80,18 @@ pub fn execute_with_trace(
             let silent = run - traced;
             // Even run of H is identity. Keep the previous AIR snapshot so the
             // next row stays on that fixed-point state instead of a raw resample.
-            for gate in &gates[i..i + silent] {
-                state.apply_gate(gate)?;
+            for k in 0..silent {
+                apply(state, &TraceStep::One(i + k))?;
             }
             if traced == 1 {
-                emit_gate_trace(state, gates[i + silent].clone(), &mut trace, &mut air_amps)?;
+                let idx = i + silent;
+                emit_gate_trace(
+                    state,
+                    gates[idx].clone(),
+                    &mut trace,
+                    &mut air_amps,
+                    |state| apply(state, &TraceStep::One(idx)),
+                )?;
             }
             i += run;
             continue;
@@ -63,8 +103,8 @@ pub fn execute_with_trace(
                 // The previous post row is still the right snapshot. Dropping it
                 // makes the terminal row resample the phased state and fail the
                 // identity link (air_sum = 4·scale²).
-                for gate in &gates[i..i + run] {
-                    state.apply_gate(gate)?;
+                for k in 0..run {
+                    apply(state, &TraceStep::One(i + k))?;
                 }
             } else {
                 // Emit one net-angle rotation so intermediate both-nonzero states are not
@@ -75,7 +115,14 @@ pub fn execute_with_trace(
                     Gate::RZ(t, _) => Gate::RZ(*t, angle_sum),
                     _ => unreachable!("rotation run"),
                 };
-                emit_gate_trace(state, net, &mut trace, &mut air_amps)?;
+                let step = TraceStep::Net {
+                    start: i,
+                    len: run,
+                    net: net.clone(),
+                };
+                emit_gate_trace(state, net, &mut trace, &mut air_amps, |state| {
+                    apply(state, &step)
+                })?;
             }
             i += run;
             continue;
@@ -91,12 +138,25 @@ pub fn execute_with_trace(
             0
         };
         if layer >= 2 {
-            emit_disjoint_layer(state, &gates[i..i + layer], &mut trace, &mut air_amps)?;
+            let step = TraceStep::Layer {
+                start: i,
+                len: layer,
+            };
+            emit_disjoint_layer(
+                state,
+                &gates[i..i + layer],
+                &mut trace,
+                &mut air_amps,
+                |state| apply(state, &step),
+            )?;
             i += layer;
             continue;
         }
 
-        emit_gate_trace(state, gate.clone(), &mut trace, &mut air_amps)?;
+        let step = TraceStep::One(i);
+        emit_gate_trace(state, gate.clone(), &mut trace, &mut air_amps, |state| {
+            apply(state, &step)
+        })?;
         i += 1;
     }
 
@@ -110,6 +170,20 @@ pub fn execute_with_trace(
     apply_transition_links(&mut trace);
 
     Ok(trace)
+}
+
+fn apply_trace_step(
+    state: &mut MpsState,
+    gates: &[Gate],
+    step: &TraceStep,
+) -> Result<(), EngineError> {
+    match step {
+        TraceStep::One(index) => state.apply_gate(&gates[*index]),
+        TraceStep::Net { net, .. } => state.apply_gate(net),
+        TraceStep::Layer { start, len } => {
+            state.apply_adjacent_disjoint_gates(&gates[*start..*start + *len])
+        }
+    }
 }
 
 fn consecutive_h_run(gates: &[Gate]) -> Option<usize> {
@@ -187,12 +261,16 @@ fn adjacent_disjoint_len(gates: &[Gate]) -> usize {
     }
 }
 
-fn emit_disjoint_layer(
+fn emit_disjoint_layer<F>(
     state: &mut MpsState,
     gates: &[Gate],
     trace: &mut Vec<f64>,
     air_amps: &mut HashMap<usize, AirAmpState>,
-) -> Result<(), EngineError> {
+    apply: F,
+) -> Result<(), EngineError>
+where
+    F: FnOnce(&mut MpsState) -> Result<(), EngineError>,
+{
     let mut pres = Vec::with_capacity(gates.len());
     for gate in gates {
         let logical_target = gate_logical_target(gate);
@@ -221,7 +299,7 @@ fn emit_disjoint_layer(
             p_sin,
         ));
     }
-    state.apply_adjacent_disjoint_gates(gates)?;
+    apply(state)?;
     for (gate, logical_target, pre, ctrl_active, ctrl_active_2, p_cos, p_sin) in pres {
         let post = air_exact_post_amps(&gate, &pre, ctrl_active, ctrl_active_2, p_cos, p_sin);
         push_trace_row(
@@ -247,12 +325,16 @@ fn is_identity_rotation(angle_sum: f64) -> bool {
     reduced.abs() < 1e-9 || (std::f64::consts::TAU - reduced).abs() < 1e-9
 }
 
-fn emit_gate_trace(
+fn emit_gate_trace<F>(
     state: &mut MpsState,
     gate: Gate,
     trace: &mut Vec<f64>,
     air_amps: &mut HashMap<usize, AirAmpState>,
-) -> Result<(), EngineError> {
+    apply: F,
+) -> Result<(), EngineError>
+where
+    F: FnOnce(&mut MpsState) -> Result<(), EngineError>,
+{
     let logical_target = gate_logical_target(&gate);
     let (pre, ctrl_active, ctrl_active_2, p_cos, p_sin) =
         resolve_pre_amps(state, &gate, logical_target, air_amps);
@@ -270,7 +352,7 @@ fn emit_gate_trace(
         logical_target as f64,
     );
 
-    state.apply_gate(&gate)?;
+    apply(state)?;
 
     let post = air_exact_post_amps(&gate, &pre, ctrl_active, ctrl_active_2, p_cos, p_sin);
     push_trace_row(

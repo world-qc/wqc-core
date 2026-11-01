@@ -616,6 +616,42 @@ impl MpsState {
         self.apply_two_qubit_at_positions(p, q, &swap_matrix(), true)
     }
 
+    pub(crate) fn apply_unary_at(&mut self, site: usize, gate: &Gate) -> Result<(), EngineError> {
+        self.apply_one_qubit(site, &unary_matrix(gate));
+        Ok(())
+    }
+
+    pub(crate) fn apply_tdg_at(&mut self, site: usize) -> Result<(), EngineError> {
+        self.apply_one_qubit(site, &tdg_matrix());
+        Ok(())
+    }
+
+    pub(crate) fn apply_swap_at(&mut self, site: usize) -> Result<(), EngineError> {
+        self.apply_swap_positions(site, site + 1)
+    }
+
+    pub(crate) fn apply_pair_at(
+        &mut self,
+        site: usize,
+        gate: &Gate,
+        ctrl_on_left: bool,
+    ) -> Result<(), EngineError> {
+        self.apply_two_qubit_at_positions(site, site + 1, &two_qubit_matrix(gate), ctrl_on_left)
+    }
+
+    pub(crate) fn apply_cnot_at(
+        &mut self,
+        site: usize,
+        ctrl_on_left: bool,
+    ) -> Result<(), EngineError> {
+        self.apply_two_qubit_at_positions(
+            site,
+            site + 1,
+            &super::gates::cnot_matrix(),
+            ctrl_on_left,
+        )
+    }
+
     fn apply_ccnot(&mut self, c1: usize, c2: usize, t: usize) -> Result<(), EngineError> {
         let tdg = tdg_matrix();
         self.apply_one_qubit(t, &unary_matrix(&Gate::H(t)));
