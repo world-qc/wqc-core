@@ -17,6 +17,10 @@
 //! Wire numbers stay the parent circuit's. A wire no gate touches stays
 //! `|0⟩`. The call has no slice assignments. A task with no tree stays on
 //! `contract_slice`.
+//!
+//! A network tree (`kind: "network"`) is the whole circuit as one tensor
+//! network: `ket0` and `bra0` close every wire, so legs close as the
+//! contraction goes and the root is the amplitude. See [`super::network`].
 
 use std::ops::Range;
 
@@ -34,8 +38,10 @@ use super::trace::{execute_with_trace_using, TraceStep};
 pub enum TensorRef {
     /// `|0⟩` on a parent-circuit wire.
     Ket0(u32),
-    /// Unitary gate `gates[i]`. Exact trees only.
+    /// Unitary gate `gates[i]`. Exact and network trees only.
     Gate(u32),
+    /// `⟨0|` at the end of a parent-circuit wire. Network trees only.
+    Bra0(u32),
     /// The site tensor written by unary node `nodes[i]`, or the exact
     /// contraction `nodes[i]`.
     Node(u32),
@@ -92,12 +98,22 @@ pub enum ContractionNode {
     },
 }
 
+/// Tree kind on the wire. Absent is a sweep or an exact tree, told apart by
+/// the nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractionKind {
+    Network,
+}
+
 /// Sweep tree, or an exact contraction with its declared live-tensor peak.
 ///
 /// An empty `site_order` is the identity `0..qubit_count`. `peak_bytes` is
-/// set only on an exact tree. One state tensor is `16 << open_legs` bytes.
+/// set only on an exact or network tree. One tensor is `16 << legs` bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractionTree {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ContractionKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub site_order: Vec<u32>,
     pub nodes: Vec<ContractionNode>,
@@ -173,6 +189,14 @@ pub fn validate_sweep_dispatch(dispatch: &SweepDispatch<'_>) -> Result<(), Engin
                 dispatch.mps_site_order,
             )?;
         }
+        TreeKind::Network => {
+            super::network::validate(
+                dispatch.qubit_count,
+                dispatch.gates,
+                dispatch.tree,
+                dispatch.mps_site_order,
+            )?;
+        }
     }
     Ok(())
 }
@@ -180,6 +204,7 @@ pub fn validate_sweep_dispatch(dispatch: &SweepDispatch<'_>) -> Result<(), Engin
 enum TreeKind {
     Sweep,
     Exact,
+    Network,
 }
 
 /// Tree-shape and budget failures are the caller's tree, so the compute path
@@ -204,6 +229,9 @@ pub fn is_contraction_client_error(err: &EngineError) -> bool {
 }
 
 fn tree_kind(tree: &ContractionTree) -> Result<TreeKind, EngineError> {
+    if tree.kind == Some(ContractionKind::Network) {
+        return Ok(TreeKind::Network);
+    }
     let exact = tree
         .nodes
         .iter()
@@ -235,8 +263,13 @@ pub fn contract_tree(
     mps_site_order: Option<&[usize]>,
     state: &mut MpsState,
 ) -> Result<(ComplexResult, Vec<f64>), EngineError> {
-    if matches!(tree_kind(tree)?, TreeKind::Exact) {
-        let amp = super::exact::contract_exact(qubit_count, gates, tree, mps_site_order)?;
+    let kind = tree_kind(tree)?;
+    if matches!(kind, TreeKind::Exact | TreeKind::Network) {
+        let amp = if matches!(kind, TreeKind::Network) {
+            super::network::contract_network(qubit_count, gates, tree, mps_site_order)?
+        } else {
+            super::exact::contract_exact(qubit_count, gates, tree, mps_site_order)?
+        };
         if state.qubit_count != qubit_count {
             return Err(EngineError::MismatchedRegister);
         }
@@ -376,6 +409,7 @@ fn build_sweep(
     }
     Ok(BuiltSweep {
         tree: ContractionTree {
+            kind: None,
             site_order,
             nodes: build.nodes,
             peak_bytes: None,
@@ -761,7 +795,7 @@ impl<'a> Live<'a> {
     fn wire_of(&self, tensor: TensorRef) -> Result<u32, EngineError> {
         let wire = match tensor {
             TensorRef::Ket0(wire) => Some(wire),
-            TensorRef::Gate(_) => None,
+            TensorRef::Gate(_) | TensorRef::Bra0(_) => None,
             TensorRef::Node(index) => self.node_wire.get(index as usize).copied().flatten(),
             TensorRef::Left(index) => self.left_wire.get(index as usize).copied().flatten(),
             TensorRef::Right(index) => self.right_wire.get(index as usize).copied().flatten(),

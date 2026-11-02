@@ -18,7 +18,7 @@ const MAX_GATES: usize = 100_000;
 const MAX_LEGS: usize = 26;
 const MAX_PEAK: u64 = 1 << 30;
 
-fn plan_greedy(qubit_count: usize, gates: &[Gate]) -> Option<ContractionTree> {
+pub(crate) fn plan_greedy(qubit_count: usize, gates: &[Gate]) -> Option<ContractionTree> {
     if qubit_count == 0 || qubit_count > MAX_QUBITS || gates.len() > MAX_GATES {
         return None;
     }
@@ -37,6 +37,7 @@ fn plan_greedy(qubit_count: usize, gates: &[Gate]) -> Option<ContractionTree> {
         }
     }
     Some(ContractionTree {
+        kind: None,
         site_order: Vec::new(),
         nodes: plan.nodes,
         peak_bytes: Some(plan.peak),
