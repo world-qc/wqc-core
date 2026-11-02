@@ -679,6 +679,50 @@ mod tests {
         }
     }
 
+    /// `PlanNetworkContraction` in `wqc-orchestrator` decodes to this same
+    /// text for the same circuit.
+    const FIXTURE_JSON: &str = r#"{"kind":"network","nodes":[{"op":"contract","left":{"ket0":1},"right":{"gate":3}},{"op":"contract","left":{"bra0":0},"right":{"node":0}},{"op":"contract","left":{"gate":1},"right":{"node":1}},{"op":"contract","left":{"ket0":2},"right":{"node":2}},{"op":"contract","left":{"bra0":2},"right":{"node":3}},{"op":"contract","left":{"ket0":0},"right":{"gate":0}},{"op":"contract","left":{"gate":4},"right":{"bra0":1}},{"op":"contract","left":{"node":4},"right":{"node":5}},{"op":"contract","left":{"ket0":3},"right":{"bra0":3}},{"op":"contract","left":{"node":6},"right":{"node":7}},{"op":"contract","left":{"node":8},"right":{"node":9}}],"peak_bytes":2080}"#;
+
+    #[test]
+    fn orchestrator_fixture_is_the_greedy_tree_and_matches_dense() {
+        let gates = vec![
+            Gate::H(0),
+            Gate::CNOT(0, 2),
+            Gate::MEASURE(crate::engine::MeasureParams { qubit: 1, cbit: 0 }),
+            Gate::CCNOT(0, 2, 1),
+            Gate::RZ(1, 0.4),
+        ];
+        let tree: ContractionTree = serde_json::from_str(FIXTURE_JSON).expect("parse");
+        assert_eq!(tree, greedy_tree(4, &gates));
+        assert_eq!(serde_json::to_string(&tree).expect("json"), FIXTURE_JSON);
+        let unitary: Vec<Gate> = gates
+            .iter()
+            .filter(|g| !matches!(g, Gate::MEASURE(_)))
+            .cloned()
+            .collect();
+        let got = contract_network(4, &gates, &tree, None).expect("network");
+        let expected = dense_zero(4, &unitary);
+        assert!(expected.norm() > 0.1, "amplitude vanished: {expected}");
+        assert_close(got, expected);
+    }
+
+    /// SHA3-256 of the orchestrator's tree JSON for a 6-qubit depth-3
+    /// brickwork. Many pairs tie on cost there, so this pins the tie order.
+    const BRICKWORK_TREE_SHA3: &str =
+        "dccaf420f62676fdc7f589aa8791dd29ecd145c68a9af661dabfd443429aa2c1";
+
+    #[test]
+    fn orchestrator_brickwork_tree_hash_matches_the_greedy() {
+        use sha3::{Digest, Sha3_256};
+        let tree = greedy_tree(6, &brickwork(6, 3));
+        let json = serde_json::to_string(&tree).expect("json");
+        assert_eq!(
+            hex::encode(Sha3_256::digest(json.as_bytes())),
+            BRICKWORK_TREE_SHA3,
+            "{json}"
+        );
+    }
+
     #[test]
     fn untouched_wire_and_skipped_ops_close_with_one() {
         let gates = vec![
