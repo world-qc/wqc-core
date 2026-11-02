@@ -679,8 +679,9 @@ mod tests {
         }
     }
 
-    /// `PlanNetworkContraction` in `wqc-orchestrator` decodes to this same
-    /// text for the same circuit.
+    /// The orchestrator's plain greedy pass emits this text for the same
+    /// circuit. Its search stops at once here, so `PlanNetworkContraction`
+    /// returns it too.
     const FIXTURE_JSON: &str = r#"{"kind":"network","nodes":[{"op":"contract","left":{"ket0":1},"right":{"gate":3}},{"op":"contract","left":{"bra0":0},"right":{"node":0}},{"op":"contract","left":{"gate":1},"right":{"node":1}},{"op":"contract","left":{"ket0":2},"right":{"node":2}},{"op":"contract","left":{"bra0":2},"right":{"node":3}},{"op":"contract","left":{"ket0":0},"right":{"gate":0}},{"op":"contract","left":{"gate":4},"right":{"bra0":1}},{"op":"contract","left":{"node":4},"right":{"node":5}},{"op":"contract","left":{"ket0":3},"right":{"bra0":3}},{"op":"contract","left":{"node":6},"right":{"node":7}},{"op":"contract","left":{"node":8},"right":{"node":9}}],"peak_bytes":2080}"#;
 
     #[test]
@@ -706,8 +707,9 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// SHA3-256 of the orchestrator's tree JSON for a 6-qubit depth-3
-    /// brickwork. Many pairs tie on cost there, so this pins the tie order.
+    /// SHA3-256 of the orchestrator's plain greedy tree JSON for a 6-qubit
+    /// depth-3 brickwork. Many pairs tie on cost there, so this pins the tie
+    /// order.
     const BRICKWORK_TREE_SHA3: &str =
         "dccaf420f62676fdc7f589aa8791dd29ecd145c68a9af661dabfd443429aa2c1";
 
@@ -721,6 +723,56 @@ mod tests {
             BRICKWORK_TREE_SHA3,
             "{json}"
         );
+    }
+
+    /// RY and RZ on every qubit of a side×side grid, then CNOTs on
+    /// alternating pairs: two layers along rows, two along columns. The
+    /// orchestrator's `gridCircuit`.
+    fn grid(side: usize, depth: usize) -> Vec<Gate> {
+        let at = |row: usize, col: usize| row * side + col;
+        let mut gates = Vec::new();
+        for layer in 0..depth {
+            for q in 0..side * side {
+                gates.push(Gate::RY(q, 0.17));
+                gates.push(Gate::RZ(q, 0.31));
+            }
+            if layer % 4 < 2 {
+                for row in 0..side {
+                    for col in (layer % 2..side.saturating_sub(1)).step_by(2) {
+                        gates.push(Gate::CNOT(at(row, col), at(row, col + 1)));
+                    }
+                }
+            } else {
+                for row in (layer % 2..side.saturating_sub(1)).step_by(2) {
+                    for col in 0..side {
+                        gates.push(Gate::CNOT(at(row, col), at(row + 1, col)));
+                    }
+                }
+            }
+        }
+        gates
+    }
+
+    /// The orchestrator's searched tree for a 4×4 grid, depth 12. The search
+    /// picked it over the plain greedy (2.4 MB peak against 9.0 MB).
+    const GRID_TREE_JSON: &str = include_str!("network_grid_4x4_d12.json");
+    const GRID_TREE_SHA3: &str = "3ac1c2130343db568ea5ee2c22b6f2f7291f0d39cd3c73800aad3be734ad01ed";
+
+    #[test]
+    fn orchestrator_searched_tree_matches_dense() {
+        use sha3::{Digest, Sha3_256};
+        assert_eq!(
+            hex::encode(Sha3_256::digest(GRID_TREE_JSON.as_bytes())),
+            GRID_TREE_SHA3
+        );
+        let tree: ContractionTree = serde_json::from_str(GRID_TREE_JSON).expect("parse");
+        assert_ne!(tree, greedy_tree(16, &grid(4, 12)), "not a searched tree");
+        let gates = grid(4, 12);
+        validate(16, &gates, &tree, None).expect("declared peak");
+        let got = contract_network(16, &gates, &tree, None).expect("network");
+        let expected = dense_zero(16, &gates);
+        assert!(expected.norm() > 0.1, "amplitude vanished: {expected}");
+        assert_close(got, expected);
     }
 
     #[test]
