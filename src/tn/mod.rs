@@ -11,6 +11,7 @@ pub mod engine_status;
 mod exact;
 pub mod gates;
 pub mod mps;
+mod network;
 #[cfg(test)]
 mod plan;
 pub mod site_order;

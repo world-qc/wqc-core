@@ -96,7 +96,7 @@ fn declared_peak(tree: &ContractionTree) -> Result<u64, EngineError> {
     Ok(declared)
 }
 
-fn check_shape(
+pub(crate) fn check_shape(
     qubit_count: usize,
     gates: &[Gate],
     tree: &ContractionTree,
@@ -112,7 +112,7 @@ fn check_shape(
     let tree_order = canonicalize_site_order(qubit_count, &tree.site_order)?;
     if !tree_order.is_empty() {
         return Err(EngineError::ExecutionFailed(
-            "exact contraction keeps parent wire numbers".into(),
+            "contraction tree keeps parent wire numbers".into(),
         ));
     }
     if let Some(order) = mps_site_order {
@@ -247,6 +247,9 @@ fn ref_id(tensor: TensorRef) -> Result<RefId, EngineError> {
         TensorRef::Node(index) => Ok(RefId::Node(index)),
         TensorRef::Left(_) | TensorRef::Right(_) => Err(EngineError::ExecutionFailed(
             "exact contraction has no split".into(),
+        )),
+        TensorRef::Bra0(_) => Err(EngineError::ExecutionFailed(
+            "exact contraction has no bra0".into(),
         )),
     }
 }
@@ -470,7 +473,11 @@ fn outer(
     Ok(Live::State { wires, data })
 }
 
-fn apply_in_place(data: &mut [Complex64], wires: &[u32], gate: &Gate) -> Result<(), EngineError> {
+pub(crate) fn apply_in_place(
+    data: &mut [Complex64],
+    wires: &[u32],
+    gate: &Gate,
+) -> Result<(), EngineError> {
     if data.len() != 1usize << wires.len() {
         return Err(EngineError::ExecutionFailed(
             "contraction tree tensor is not ready".into(),
@@ -551,7 +558,7 @@ fn apply_in_place(data: &mut [Complex64], wires: &[u32], gate: &Gate) -> Result<
     Ok(())
 }
 
-fn gate_wires(gate: &Gate) -> Result<Vec<u32>, EngineError> {
+pub(crate) fn gate_wires(gate: &Gate) -> Result<Vec<u32>, EngineError> {
     let wires: Vec<u32> = match gate {
         Gate::H(t)
         | Gate::X(t)
@@ -680,6 +687,7 @@ mod tests {
             });
         }
         let mut tree = ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes,
             peak_bytes: None,
@@ -777,6 +785,7 @@ mod tests {
             });
         }
         let mut tree = ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes,
             peak_bytes: None,
@@ -799,6 +808,7 @@ mod tests {
     fn gates_out_of_circuit_order_are_rejected() {
         let gates = vec![Gate::H(0), Gate::X(0)];
         let tree = ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes: vec![ContractionNode::Contract {
                 left: TensorRef::Ket0(0),
@@ -815,6 +825,7 @@ mod tests {
     fn untouched_wire_stays_ket0() {
         let gates = vec![Gate::H(0)];
         let mut tree = ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes: vec![ContractionNode::Contract {
                 left: TensorRef::Ket0(0),
@@ -875,6 +886,7 @@ mod tests {
             1,
             &[bad_if],
             &ContractionTree {
+                kind: None,
                 site_order: Vec::new(),
                 nodes: Vec::new(),
                 peak_bytes: Some(0),
@@ -887,6 +899,7 @@ mod tests {
             1,
             &[Gate::RESET(3)],
             &ContractionTree {
+                kind: None,
                 site_order: Vec::new(),
                 nodes: Vec::new(),
                 peak_bytes: Some(0),
@@ -914,6 +927,7 @@ mod tests {
             });
         }
         ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes,
             peak_bytes: None,
@@ -927,6 +941,7 @@ mod tests {
         let right = join_wires(14u32..27, &mut nodes);
         nodes.push(ContractionNode::Contract { left, right });
         ContractionTree {
+            kind: None,
             site_order: Vec::new(),
             nodes,
             peak_bytes: Some(0),
