@@ -42,6 +42,10 @@ pub enum TensorRef {
     Gate(u32),
     /// `⟨0|` at the end of a parent-circuit wire. Network trees only.
     Bra0(u32),
+    /// The first wire's half of two-wire gate `gates[i]`. Network trees only.
+    Control(u32),
+    /// The second wire's half of two-wire gate `gates[i]`. Network trees only.
+    Target(u32),
     /// The site tensor written by unary node `nodes[i]`, or the exact
     /// contraction `nodes[i]`.
     Node(u32),
@@ -795,7 +799,10 @@ impl<'a> Live<'a> {
     fn wire_of(&self, tensor: TensorRef) -> Result<u32, EngineError> {
         let wire = match tensor {
             TensorRef::Ket0(wire) => Some(wire),
-            TensorRef::Gate(_) | TensorRef::Bra0(_) => None,
+            TensorRef::Gate(_)
+            | TensorRef::Bra0(_)
+            | TensorRef::Control(_)
+            | TensorRef::Target(_) => None,
             TensorRef::Node(index) => self.node_wire.get(index as usize).copied().flatten(),
             TensorRef::Left(index) => self.left_wire.get(index as usize).copied().flatten(),
             TensorRef::Right(index) => self.right_wire.get(index as usize).copied().flatten(),

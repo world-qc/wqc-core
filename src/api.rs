@@ -677,10 +677,15 @@ pub async fn handle_leaf_pcs(
     }))
 }
 
-/// Returns supported gates for orchestrator discovery.
+/// Executor capability listed with the gates: network trees may take a CNOT
+/// or CZ as `control` and `target` halves.
+pub const NETWORK_GATE_SPLIT: &str = "NETWORK_GATE_SPLIT";
+
+/// Returns supported gates for orchestrator discovery, then capabilities.
 pub async fn get_supported_gates() -> Json<Vec<String>> {
     use strum::IntoEnumIterator;
-    let gates = crate::engine::Gate::iter().map(|g| g.to_string()).collect();
+    let mut gates: Vec<String> = crate::engine::Gate::iter().map(|g| g.to_string()).collect();
+    gates.push(NETWORK_GATE_SPLIT.to_string());
     Json(gates)
 }
 
@@ -733,5 +738,15 @@ mod tests {
             "site remap changes measure qubit indices and their hash"
         );
         assert_eq!(committed_measurement_spec_hash(&circuit), logical);
+    }
+
+    #[tokio::test]
+    async fn gates_list_the_split_capability_last() {
+        let axum::Json(gates) = super::get_supported_gates().await;
+        assert!(gates.iter().any(|g| g == "CNOT"), "{gates:?}");
+        assert_eq!(
+            gates.last().map(String::as_str),
+            Some(super::NETWORK_GATE_SPLIT)
+        );
     }
 }
