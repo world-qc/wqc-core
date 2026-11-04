@@ -409,7 +409,14 @@ fn matmul_transposed(
     let shape_err = |_| EngineError::ExecutionFailed("contraction tree tensor is not ready".into());
     let a = ArrayView2::from_shape((m, k), a).map_err(shape_err)?;
     let b = ArrayView2::from_shape((n, k), b).map_err(shape_err)?;
-    Ok(a.dot(&b.t()).into_raw_vec())
+    // With k = 1 both operands are also column-major, and `dot` may return a
+    // column-major product. Its raw vector would then be the transpose.
+    let product = a.dot(&b.t());
+    Ok(if product.is_standard_layout() {
+        product.into_raw_vec()
+    } else {
+        product.as_standard_layout().into_owned().into_raw_vec()
+    })
 }
 
 /// Reorder legs `from` into `to`. Leg `p` of a tensor is bit `p` of its index.
@@ -931,6 +938,26 @@ mod tests {
         let mut mps = MpsState::try_new_with_bond(n, 4).expect("mps");
         let err = contract_tree(n, &gates, &tree, None, &mut mps).unwrap_err();
         assert!(is_contraction_client_error(&err), "{err}");
+    }
+
+    #[test]
+    fn outer_products_of_tensors_with_legs_keep_their_order() {
+        // ket0(1) shares nothing with the wire-0 tensor; both have a leg.
+        let gates = vec![Gate::RY(0, 0.3), Gate::RY(1, 0.5)];
+        let node = |left, right| ContractionNode::Contract { left, right };
+        let tree = finish(
+            2,
+            &gates,
+            vec![
+                node(TensorRef::Ket0(0), TensorRef::Gate(0)),
+                node(TensorRef::Node(0), TensorRef::Ket0(1)),
+                node(TensorRef::Node(1), TensorRef::Gate(1)),
+                node(TensorRef::Node(2), TensorRef::Bra0(0)),
+                node(TensorRef::Node(3), TensorRef::Bra0(1)),
+            ],
+        );
+        let got = contract_network(2, &gates, &tree, None).expect("network");
+        assert_close(got, dense_zero(2, &gates));
     }
 
     #[test]
