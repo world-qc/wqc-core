@@ -251,6 +251,9 @@ fn ref_id(tensor: TensorRef) -> Result<RefId, EngineError> {
         TensorRef::Bra0(_) => Err(EngineError::ExecutionFailed(
             "exact contraction has no bra0".into(),
         )),
+        TensorRef::Control(_) | TensorRef::Target(_) => Err(EngineError::ExecutionFailed(
+            "exact contraction has no gate halves".into(),
+        )),
     }
 }
 

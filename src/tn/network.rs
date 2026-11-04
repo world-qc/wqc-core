@@ -7,6 +7,12 @@
 //! two leaves. The tree names leaves only. Edges follow from the circuit, and
 //! MEASURE, RESET, and IF are skipped as in the exact tree.
 //!
+//! A CNOT or CZ may instead enter as two halves, `control(i)` and
+//! `target(i)`, joined by a bond edge. Each half has the input, output, and
+//! bond legs of its wire. The control half is 1 where all three are equal;
+//! the target half is the identity on bond 0 and X (CNOT) or Z (CZ) on bond 1.
+//! Their contraction is the gate. A tree uses a gate whole or both halves.
+//!
 //! A node contracts two tensors over the edges they share; the result keeps
 //! the rest. Two tensors that share nothing are multiplied. Every leaf is used
 //! once, every node but the last is used once, and the last node has no legs.
@@ -39,11 +45,13 @@ pub(crate) struct Network {
     bra: Vec<u32>,
     /// Inputs, then outputs, in the gate's wire order. `None` is not unitary.
     gate: Vec<Option<Vec<u32>>>,
+    /// Edges on wires. The bond of gate `i` is edge `wire_edges + i`.
+    wire_edges: u32,
 }
 
 impl Network {
     /// Edge `w` leaves `ket0(w)`. Each gate numbers its outputs next, in wire
-    /// order.
+    /// order. Bonds come after every wire edge, by gate index.
     pub(crate) fn build(qubit_count: usize, gates: &[Gate]) -> Result<Self, EngineError> {
         let mut current: Vec<u32> = (0..qubit_count as u32).collect();
         let mut next = qubit_count as u32;
@@ -63,9 +71,16 @@ impl Network {
             }
             legs_of.push(Some(legs));
         }
+        u32::try_from(gates.len())
+            .ok()
+            .and_then(|count| next.checked_add(count))
+            .ok_or_else(|| {
+                EngineError::ExecutionFailed("contraction tree has too many edges".into())
+            })?;
         Ok(Self {
             bra: current,
             gate: legs_of,
+            wire_edges: next,
         })
     }
 
@@ -79,6 +94,13 @@ impl Network {
 
     pub(crate) fn bra_edge(&self, wire: usize) -> u32 {
         self.bra[wire]
+    }
+
+    /// Input, output, and bond edges of one half of gate `index`. Half 0 is
+    /// the first wire.
+    pub(crate) fn half_legs(&self, index: usize, half: usize) -> Option<[u32; 3]> {
+        let legs = self.gate_legs(index)?;
+        (legs.len() == 4).then(|| [legs[half], legs[2 + half], self.wire_edges + index as u32])
     }
 }
 
@@ -167,7 +189,7 @@ fn walk(
         eval,
         ket: vec![false; qubit_count],
         bra: vec![false; qubit_count],
-        gate: vec![false; gates.len()],
+        gate: vec![0; gates.len()],
     };
     let mut live: BTreeMap<usize, Tensor> = BTreeMap::new();
     let mut live_bytes = 0u64;
@@ -195,10 +217,9 @@ fn walk(
     }
 
     if leaves.ket.iter().chain(&leaves.bra).any(|used| !used)
-        || gates
-            .iter()
-            .enumerate()
-            .any(|(i, _)| network.gate_legs(i).is_some() && !leaves.gate[i])
+        || gates.iter().enumerate().any(|(i, _)| {
+            network.gate_legs(i).is_some() && !matches!(leaves.gate[i], WHOLE | HALVES)
+        })
     {
         return Err(EngineError::ExecutionFailed(
             "contraction tree leaves a leaf out".into(),
@@ -250,6 +271,8 @@ fn take(
         TensorRef::Ket0(wire) => leaves.ket(wire as usize),
         TensorRef::Bra0(wire) => leaves.bra(wire as usize),
         TensorRef::Gate(gate) => leaves.gate(gate as usize),
+        TensorRef::Control(gate) => leaves.half(gate as usize, 0),
+        TensorRef::Target(gate) => leaves.half(gate as usize, 1),
         TensorRef::Left(_) | TensorRef::Right(_) => Err(EngineError::ExecutionFailed(
             "contraction tree network has no split".into(),
         )),
@@ -262,8 +285,14 @@ struct Leaves<'a> {
     eval: bool,
     ket: Vec<bool>,
     bra: Vec<bool>,
-    gate: Vec<bool>,
+    /// `WHOLE`, or the `CONTROL` and `TARGET` bits taken so far.
+    gate: Vec<u8>,
 }
+
+const WHOLE: u8 = 1;
+const CONTROL: u8 = 2;
+const TARGET: u8 = 4;
+const HALVES: u8 = CONTROL | TARGET;
 
 impl Leaves<'_> {
     fn ket(&mut self, wire: usize) -> Result<Tensor, EngineError> {
@@ -290,12 +319,7 @@ impl Leaves<'_> {
         let legs = self.network.gate_legs(index).ok_or_else(|| {
             EngineError::ExecutionFailed(format!("gate {index} is not a contraction leaf"))
         })?;
-        if self.gate[index] {
-            return Err(EngineError::ExecutionFailed(
-                "contraction tree reuses a tensor".into(),
-            ));
-        }
-        self.gate[index] = true;
+        self.take_gate(index, WHOLE)?;
         let data = if self.eval {
             Some(gate_tensor(gate)?)
         } else {
@@ -306,6 +330,70 @@ impl Leaves<'_> {
             data,
         })
     }
+
+    fn half(&mut self, index: usize, half: usize) -> Result<Tensor, EngineError> {
+        let gate = self.gates.get(index).ok_or_else(|| {
+            EngineError::ExecutionFailed("contraction tree gate is missing".into())
+        })?;
+        let target_is_z = match gate {
+            Gate::CNOT(..) => false,
+            Gate::CZ(..) => true,
+            _ => {
+                return Err(EngineError::ExecutionFailed(format!(
+                    "gate {index} has no halves"
+                )))
+            }
+        };
+        let legs = self.network.half_legs(index, half).ok_or_else(|| {
+            EngineError::ExecutionFailed(format!("gate {index} is not a contraction leaf"))
+        })?;
+        self.take_gate(index, if half == 0 { CONTROL } else { TARGET })?;
+        let data = self.eval.then(|| half_tensor(half, target_is_z));
+        Ok(Tensor {
+            legs: legs.to_vec(),
+            data,
+        })
+    }
+
+    fn take_gate(&mut self, index: usize, part: u8) -> Result<(), EngineError> {
+        let used = self.gate[index];
+        if used & part != 0 {
+            return Err(EngineError::ExecutionFailed(
+                "contraction tree reuses a tensor".into(),
+            ));
+        }
+        if used != 0 && (used | part) & WHOLE != 0 {
+            return Err(EngineError::ExecutionFailed(
+                "contraction tree mixes a gate and its halves".into(),
+            ));
+        }
+        self.gate[index] = used | part;
+        Ok(())
+    }
+}
+
+/// Entry `input | output << 1 | bond << 2` of one half of a CNOT or CZ.
+fn half_tensor(half: usize, target_is_z: bool) -> Vec<Complex64> {
+    (0..8usize)
+        .map(|index| {
+            let (input, output, bond) = (index & 1, index >> 1 & 1, index >> 2);
+            let value = match (half, bond) {
+                (0, _) => (input == output && output == bond) as u8 as f64,
+                (_, 0) => (input == output) as u8 as f64,
+                _ if target_is_z => {
+                    if input != output {
+                        0.0
+                    } else if input == 1 {
+                        -1.0
+                    } else {
+                        1.0
+                    }
+                }
+                _ => (input != output) as u8 as f64,
+            };
+            Complex64::new(value, 0.0)
+        })
+        .collect()
 }
 
 fn mark(used: &mut [bool], wire: usize, qubit_count: usize) -> Result<(), EngineError> {
@@ -484,6 +572,31 @@ mod tests {
         out
     }
 
+    /// `leaves` with every CNOT and CZ as its control half, then its target.
+    fn split_leaves(qubit_count: usize, gates: &[Gate]) -> Vec<(TensorRef, Vec<u32>)> {
+        let network = Network::build(qubit_count, gates).expect("network");
+        let mut out = Vec::new();
+        for (r, legs) in leaves(qubit_count, gates) {
+            match r {
+                TensorRef::Gate(i)
+                    if matches!(gates[i as usize], Gate::CNOT(..) | Gate::CZ(..)) =>
+                {
+                    let i_us = i as usize;
+                    out.push((
+                        TensorRef::Control(i),
+                        network.half_legs(i_us, 0).expect("half").to_vec(),
+                    ));
+                    out.push((
+                        TensorRef::Target(i),
+                        network.half_legs(i_us, 1).expect("half").to_vec(),
+                    ));
+                }
+                _ => out.push((r, legs)),
+            }
+        }
+        out
+    }
+
     fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut legs: Vec<u32> = b.iter().copied().filter(|l| !a.contains(l)).collect();
         legs.extend(a.iter().copied().filter(|l| !b.contains(l)));
@@ -505,6 +618,15 @@ mod tests {
     /// Any order: pick a live tensor, then a neighbour that shares an edge
     /// with it if there is one.
     fn random_tree(qubit_count: usize, gates: &[Gate], seed: u64) -> ContractionTree {
+        random_tree_of(qubit_count, gates, leaves(qubit_count, gates), seed)
+    }
+
+    fn random_tree_of(
+        qubit_count: usize,
+        gates: &[Gate],
+        mut live: Vec<(TensorRef, Vec<u32>)>,
+        seed: u64,
+    ) -> ContractionTree {
         let mut state = seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
@@ -514,7 +636,6 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             ((state >> 33) as usize) % bound
         };
-        let mut live = leaves(qubit_count, gates);
         let mut nodes = Vec::new();
         while live.len() > 1 {
             let i = next(live.len());
@@ -543,8 +664,15 @@ mod tests {
     /// an edge, then the smaller ids. Leaves take ids in canonical order and
     /// node `i` takes `leaves + i`. Scalars join last, smallest ids first.
     pub(crate) fn greedy_tree(qubit_count: usize, gates: &[Gate]) -> ContractionTree {
-        let mut slots: Vec<Option<(TensorRef, Vec<u32>)>> =
-            leaves(qubit_count, gates).into_iter().map(Some).collect();
+        greedy_tree_of(qubit_count, gates, leaves(qubit_count, gates))
+    }
+
+    fn greedy_tree_of(
+        qubit_count: usize,
+        gates: &[Gate],
+        leaves: Vec<(TensorRef, Vec<u32>)>,
+    ) -> ContractionTree {
+        let mut slots: Vec<Option<(TensorRef, Vec<u32>)>> = leaves.into_iter().map(Some).collect();
         // Edge → the two slots that hold it.
         let mut owners: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (id, slot) in slots.iter().enumerate() {
@@ -782,6 +910,34 @@ mod tests {
         assert_close(got, expected);
     }
 
+    /// The orchestrator's tree for the same grid once gates may split. It
+    /// takes CNOTs as halves and peaks at 843776 B.
+    const SPLIT_GRID_TREE_JSON: &str = include_str!("network_grid_4x4_d12_split.json");
+    const SPLIT_GRID_TREE_SHA3: &str =
+        "06ca39ca74c302b35a58990558022c0ee78fa637d9043d8b19f8814b2f4aa561";
+
+    #[test]
+    fn orchestrator_split_tree_matches_dense() {
+        use sha3::{Digest, Sha3_256};
+        assert_eq!(
+            hex::encode(Sha3_256::digest(SPLIT_GRID_TREE_JSON.as_bytes())),
+            SPLIT_GRID_TREE_SHA3
+        );
+        let tree: ContractionTree = serde_json::from_str(SPLIT_GRID_TREE_JSON).expect("parse");
+        assert_eq!(
+            serde_json::to_string(&tree).expect("json"),
+            SPLIT_GRID_TREE_JSON
+        );
+        assert!(SPLIT_GRID_TREE_JSON.contains(r#"{"control":"#));
+        assert_eq!(tree.peak_bytes, Some(843776));
+        let gates = grid(4, 12);
+        validate(16, &gates, &tree, None).expect("declared peak");
+        let got = contract_network(16, &gates, &tree, None).expect("network");
+        let expected = dense_zero(16, &gates);
+        assert!(expected.norm() > 0.1, "amplitude vanished: {expected}");
+        assert_close(got, expected);
+    }
+
     #[test]
     fn untouched_wire_and_skipped_ops_close_with_one() {
         let gates = vec![
@@ -937,6 +1093,161 @@ mod tests {
         tree.kind = None;
         let mut mps = MpsState::try_new_with_bond(n, 4).expect("mps");
         let err = contract_tree(n, &gates, &tree, None, &mut mps).unwrap_err();
+        assert!(is_contraction_client_error(&err), "{err}");
+    }
+
+    #[test]
+    fn split_gates_match_dense() {
+        let mut circuits = vec![(5usize, brickwork(5, 4)), (4, grid(2, 6))];
+        for seed in 0..6u64 {
+            circuits.push((6, random_circuit(6, 40, seed)));
+        }
+        circuits.push((
+            3,
+            vec![
+                Gate::H(0),
+                Gate::H(2),
+                Gate::CZ(2, 0),
+                Gate::CNOT(0, 2),
+                Gate::CZ(0, 1),
+            ],
+        ));
+        for (n, gates) in &circuits {
+            let expected = dense_zero(*n, gates);
+            for seed in 0..8u64 {
+                let tree = random_tree_of(*n, gates, split_leaves(*n, gates), seed);
+                let got = contract_network(*n, gates, &tree, None).expect("network");
+                assert_close(got, expected);
+            }
+            let tree = greedy_tree_of(*n, gates, split_leaves(*n, gates));
+            let got = contract_network(*n, gates, &tree, None).expect("greedy");
+            assert_close(got, expected);
+        }
+    }
+
+    #[test]
+    fn split_and_whole_gates_mix_across_gates() {
+        // CNOT 1 whole, the others split.
+        let n = 4usize;
+        let gates = brickwork(n, 3);
+        let whole = gates
+            .iter()
+            .position(|g| matches!(g, Gate::CNOT(..)))
+            .expect("cnot") as u32;
+        let network = Network::build(n, &gates).expect("network");
+        let live: Vec<(TensorRef, Vec<u32>)> = split_leaves(n, &gates)
+            .into_iter()
+            .filter(|(r, _)| !matches!(r, TensorRef::Target(i) if *i == whole))
+            .map(|(r, legs)| match r {
+                TensorRef::Control(i) if i == whole => (
+                    TensorRef::Gate(i),
+                    network.gate_legs(i as usize).expect("legs").to_vec(),
+                ),
+                _ => (r, legs),
+            })
+            .collect();
+        let tree = random_tree_of(n, &gates, live, 3);
+        let got = contract_network(n, &gates, &tree, None).expect("network");
+        assert_close(got, dense_zero(n, &gates));
+    }
+
+    #[test]
+    fn split_tree_json_names_the_halves() {
+        let gates = vec![Gate::H(0), Gate::CNOT(0, 1)];
+        let node = |left, right| ContractionNode::Contract { left, right };
+        let tree = finish(
+            2,
+            &gates,
+            vec![
+                node(TensorRef::Control(1), TensorRef::Target(1)),
+                node(TensorRef::Ket0(0), TensorRef::Gate(0)),
+                node(TensorRef::Node(1), TensorRef::Node(0)),
+                node(TensorRef::Ket0(1), TensorRef::Node(2)),
+                node(TensorRef::Bra0(0), TensorRef::Node(3)),
+                node(TensorRef::Bra0(1), TensorRef::Node(4)),
+            ],
+        );
+        // Five wire edges: two kets, H's output, CNOT's two outputs. The bond
+        // of gate 1 is edge 5 + 1.
+        let network = Network::build(2, &gates).expect("network");
+        assert_eq!(network.half_legs(1, 0), Some([2, 3, 6]));
+        assert_eq!(network.half_legs(1, 1), Some([1, 4, 6]));
+        let json = serde_json::to_string(&tree).expect("json");
+        assert!(
+            json.starts_with(r#"{"kind":"network","nodes":[{"op":"contract","left":{"control":1},"right":{"target":1}}"#),
+            "{json}"
+        );
+        let back: ContractionTree = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, tree);
+        let got = contract_network(2, &gates, &tree, None).expect("network");
+        assert_close(got, dense_zero(2, &gates));
+    }
+
+    #[test]
+    fn bad_split_trees_are_rejected() {
+        let n = 3usize;
+        let gates = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::CCNOT(0, 1, 2)];
+        let good = greedy_tree_of(n, &gates, split_leaves(n, &gates));
+        validate(n, &gates, &good, None).expect("good");
+        let check = |tree: &ContractionTree, needle: &str| {
+            let err = validate(n, &gates, tree, None).unwrap_err();
+            assert!(err.to_string().contains(needle), "{err} lacks {needle}");
+            assert!(is_contraction_client_error(&err), "{err}");
+        };
+        let replace = |from: TensorRef, to: TensorRef| {
+            let mut tree = good.clone();
+            for node in &mut tree.nodes {
+                let ContractionNode::Contract { left, right } = node else {
+                    unreachable!()
+                };
+                for side in [left, right] {
+                    if *side == from {
+                        *side = to;
+                    }
+                }
+            }
+            tree
+        };
+
+        check(
+            &replace(TensorRef::Target(1), TensorRef::Gate(1)),
+            "mixes a gate and its halves",
+        );
+        check(
+            &replace(TensorRef::Target(1), TensorRef::Control(1)),
+            "reuses a tensor",
+        );
+        check(
+            &replace(TensorRef::Target(1), TensorRef::Control(0)),
+            "gate 0 has no halves",
+        );
+        check(
+            &replace(TensorRef::Target(1), TensorRef::Target(2)),
+            "gate 2 has no halves",
+        );
+        check(
+            &replace(TensorRef::Target(1), TensorRef::Target(9)),
+            "gate is missing",
+        );
+
+        // One half only: the bond stays open, so a leaf is left out first.
+        let mut tree = good.clone();
+        let at = tree
+            .nodes
+            .iter()
+            .position(|node| matches!(node, ContractionNode::Contract { left, right } if *left == TensorRef::Target(1) || *right == TensorRef::Target(1)))
+            .expect("target");
+        tree.nodes.truncate(at);
+        check(&tree, "leaves a leaf out");
+
+        // The exact (state) tree has no halves.
+        let mut exact = crate::tn::plan::plan_greedy(n, &gates).expect("state tree");
+        let ContractionNode::Contract { left, .. } = &mut exact.nodes[0] else {
+            panic!("exact trees start with a contraction")
+        };
+        *left = TensorRef::Control(1);
+        let mut mps = MpsState::try_new_with_bond(n, 4).expect("mps");
+        let err = contract_tree(n, &gates, &exact, None, &mut mps).unwrap_err();
         assert!(is_contraction_client_error(&err), "{err}");
     }
 
@@ -1100,6 +1411,89 @@ mod tests {
                 t.elapsed(),
                 trace.len()
             );
+        }
+    }
+
+    /// Split leaves absorbed into one tensor, by highest wire (lowest when
+    /// `reverse`), then leaf order.
+    fn split_sweep_tree(n: usize, gates: &[Gate], reverse: bool) -> ContractionTree {
+        let wires = |i: u32| gate_wires(&gates[i as usize]).expect("wires");
+        let top = |r: &TensorRef| -> u32 {
+            let (low, high) = match *r {
+                TensorRef::Ket0(w) | TensorRef::Bra0(w) => (w, w),
+                TensorRef::Control(i) => (wires(i)[0], wires(i)[0]),
+                TensorRef::Target(i) => (wires(i)[1], wires(i)[1]),
+                TensorRef::Gate(i) => {
+                    let w = wires(i);
+                    (
+                        *w.iter().min().expect("wire"),
+                        *w.iter().max().expect("wire"),
+                    )
+                }
+                _ => unreachable!(),
+            };
+            if reverse {
+                n as u32 - 1 - low
+            } else {
+                high
+            }
+        };
+        let mut leaves = split_leaves(n, gates);
+        leaves.sort_by_key(|(r, _)| top(r));
+        let mut nodes = Vec::new();
+        let mut acc = leaves[0].0;
+        for (r, _) in &leaves[1..] {
+            nodes.push(ContractionNode::Contract {
+                left: acc,
+                right: *r,
+            });
+            acc = TensorRef::Node((nodes.len() - 1) as u32);
+        }
+        finish(n, gates, nodes)
+    }
+
+    #[test]
+    fn split_sweep_matches_dense() {
+        let n = 10usize;
+        let gates = brickwork(n, 12);
+        let expected = dense_zero(n, &gates);
+        for reverse in [false, true] {
+            let tree = split_sweep_tree(n, &gates, reverse);
+            let got = contract_network(n, &gates, &tree, None).expect("network");
+            assert_close(got, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn timing_split_sweep() {
+        for (n, depth) in [(20usize, 32usize), (30, 32), (50, 32), (100, 32), (100, 40)] {
+            let gates = brickwork(n, depth);
+            let mut amps = Vec::new();
+            for reverse in [false, true] {
+                let tree = split_sweep_tree(n, &gates, reverse);
+                let Some(peak) = tree.peak_bytes else {
+                    eprintln!("{n}q depth {depth}: over budget");
+                    continue;
+                };
+                let t = std::time::Instant::now();
+                let amp = contract_network(n, &gates, &tree, None).expect("network");
+                eprintln!(
+                    "{n}q depth {depth} reverse={reverse}: split sweep peak {peak} B, contract {:?}, amp {amp:e}",
+                    t.elapsed()
+                );
+                amps.push(amp);
+            }
+            if amps.len() == 2 {
+                let scale = amps[0].norm().max(1e-300);
+                eprintln!(
+                    "  relative difference {:e}",
+                    (amps[0] - amps[1]).norm() / scale
+                );
+            }
+            if n <= 20 {
+                eprintln!("  dense {:e}", dense_zero(n, &gates));
+            }
         }
     }
 
