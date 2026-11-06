@@ -8,6 +8,8 @@ license = "GPL-3.0"
 [dependencies]
 # Numerical computing for quantum states
 ndarray = { version = "0.15", features = ["serde"] }
+# Multithreaded GEMM for network tree contractions (ndarray uses it)
+matrixmultiply = { version = "0.3", features = ["threading", "cgemm"] }
 num-complex = { version = "0.4", features = ["serde"] }
 # Parallel processing for memory-bound tasks
 sysinfo = "0.30"

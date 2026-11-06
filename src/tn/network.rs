@@ -41,6 +41,9 @@ use super::tree::{unitary_wires, ContractionKind, ContractionNode, ContractionTr
 /// Output bits a lookup table covers when legs are reordered.
 const PERMUTE_LOW_BITS: usize = 12;
 
+/// Largest `min(m, n) · k` that [`matmul_small_side`] takes instead of GEMM.
+const SMALL_SIDE: usize = 64;
+
 /// Edges of every leaf.
 pub(crate) struct Network {
     /// Edge of `bra0(w)`. The edge of `ket0(w)` is `w`.
@@ -578,6 +581,9 @@ fn matmul_transposed(
     k: usize,
     n: usize,
 ) -> Result<Vec<Complex64>, EngineError> {
+    if m.min(n) * k <= SMALL_SIDE {
+        return Ok(matmul_small_side(a, b, m, k, n));
+    }
     let shape_err = |_| EngineError::ExecutionFailed("contraction tree tensor is not ready".into());
     let a = ArrayView2::from_shape((m, k), a).map_err(shape_err)?;
     let b = ArrayView2::from_shape((n, k), b).map_err(shape_err)?;
@@ -589,6 +595,36 @@ fn matmul_transposed(
     } else {
         product.as_standard_layout().into_owned().into_raw_vec()
     })
+}
+
+/// `matmul_transposed` when one side is a few rows, such as a gate half
+/// absorbed into a large state. The GEMM kernel runs its edge path there.
+fn matmul_small_side(
+    a: &[Complex64],
+    b: &[Complex64],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<Complex64> {
+    let dot =
+        |x: &[Complex64], y: &[Complex64]| x.iter().zip(y).map(|(p, q)| p * q).sum::<Complex64>();
+    let mut out = vec![Complex64::ZERO; m * n];
+    if n <= m {
+        out.par_chunks_mut(n)
+            .zip(a.par_chunks(k))
+            .for_each(|(row, a_row)| {
+                for (slot, b_row) in row.iter_mut().zip(b.chunks(k)) {
+                    *slot = dot(a_row, b_row);
+                }
+            });
+    } else {
+        for (row, a_row) in out.chunks_mut(n).zip(a.chunks(k)) {
+            row.par_iter_mut()
+                .zip(b.par_chunks(k))
+                .for_each(|(slot, b_row)| *slot = dot(a_row, b_row));
+        }
+    }
+    out
 }
 
 /// Reorder legs `from` into `to`. Leg `p` of a tensor is bit `p` of its index.
@@ -1404,6 +1440,37 @@ mod tests {
         );
         let got = contract_network(2, &gates, &tree, None).expect("network");
         assert_close(got, dense_zero(2, &gates));
+    }
+
+    #[test]
+    fn matmul_paths_match_the_definition() {
+        // Small sides on either operand, then GEMM, including k = 1 (the
+        // column-major product) with both sides past SMALL_SIDE.
+        for (m, k, n) in [
+            (2, 2, 300),
+            (300, 2, 4),
+            (1, 1, 1),
+            (100, 1, 80),
+            (70, 4, 90),
+        ] {
+            let fill = |len: usize, seed: f64| -> Vec<Complex64> {
+                (0..len)
+                    .map(|i| Complex64::new((i as f64 * seed).sin(), (i as f64 * seed).cos()))
+                    .collect()
+            };
+            let a = fill(m * k, 0.37);
+            let b = fill(n * k, 0.61);
+            let got = matmul_transposed(&a, &b, m, k, n).expect("matmul");
+            for i in 0..m {
+                for j in 0..n {
+                    let want: Complex64 = (0..k).map(|x| a[i * k + x] * b[j * k + x]).sum();
+                    assert!(
+                        (got[i * n + j] - want).norm() < 1e-12,
+                        "{m}x{k}x{n} at {i},{j}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
