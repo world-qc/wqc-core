@@ -826,3 +826,17 @@ components:
           description: |
             From `WQC_PCS_MEMORY_POLICY`. `wqc-node` requires `spill` to bid
             on PCS open calls.
+        tn_seconds_per_byte:
+          type: number
+          format: double
+          description: |
+            Measured once at startup: seconds per byte of contraction traffic,
+            in the planner's count (`spec/work-budget.md` §1). `wqc-node`
+            turns announced `work` into an expected time with it. Absent, with
+            `tn_seconds_per_flop`, when the measurement failed.
+        tn_seconds_per_flop:
+          type: number
+          format: double
+          description: |
+            Measured once at startup: seconds per contraction flop, in the
+            planner's count (`spec/work-budget.md` §1).
