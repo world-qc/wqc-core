@@ -1034,6 +1034,29 @@ mod tests {
     }
 
     #[test]
+    fn tree_trace_sweep_is_capped_at_the_trace_bond() {
+        use crate::tn::tree::TREE_TRACE_BOND;
+        // Above 16 qubits the trace reads site amplitudes, not a dense state.
+        let n = 18usize;
+        let gates = brickwork(n, 12);
+        let tree = greedy_tree(n, &gates);
+        let wide = 4 * TREE_TRACE_BOND;
+        let mut mps = MpsState::try_new_with_bond(n, wide).expect("mps");
+        let (amp, trace) = contract_tree(n, &gates, &tree, None, &mut mps).expect("tree");
+        assert_close(Complex64::new(amp.real, amp.imag), dense_zero(n, &gates));
+        assert_eq!(mps.max_bond_dim, TREE_TRACE_BOND);
+        let trace_at = |chi: usize| {
+            let mut slice = MpsState::try_new_with_bond(n, chi).expect("mps");
+            crate::tn::contract_slice(n, &gates, &[], n, &mut slice)
+                .expect("slice")
+                .1
+        };
+        // The circuit needs more than the cap, so the cap changes the trace.
+        assert_ne!(trace_at(wide), trace_at(TREE_TRACE_BOND));
+        assert_eq!(trace, trace_at(TREE_TRACE_BOND));
+    }
+
+    #[test]
     fn bad_trees_are_rejected() {
         let n = 3usize;
         let gates = vec![Gate::H(0), Gate::CNOT(0, 1), Gate::CCNOT(0, 1, 2)];

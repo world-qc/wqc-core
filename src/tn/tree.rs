@@ -259,7 +259,13 @@ fn tree_kind(tree: &ContractionTree) -> Result<TreeKind, EngineError> {
     }
 }
 
-/// `⟨0…0|ψ⟩` and the same STARK trace the sweep emits today.
+/// Bond cap for the sweep that only feeds the STARK trace of an exact or
+/// network tree. That sweep does not bind the amplitude, and at χ 128 it costs
+/// far more than the tree (8x8 depth 11: 121 s vs 0.96 s).
+pub const TREE_TRACE_BOND: usize = 16;
+
+/// `⟨0…0|ψ⟩` and its STARK trace. Exact and network trees cap the trace sweep
+/// at [`TREE_TRACE_BOND`]; a sweep tree's trace is its own contraction.
 pub fn contract_tree(
     qubit_count: usize,
     gates: &[Gate],
@@ -279,6 +285,7 @@ pub fn contract_tree(
         }
         // The exact amplitude is not an AIR witness. The trace stays the sweep
         // so the existing prover still has rows; it does not constrain `amp`.
+        state.max_bond_dim = state.max_bond_dim.min(TREE_TRACE_BOND);
         let trace = super::trace::execute_with_trace(qubit_count, gates, state)?;
         return Ok((
             ComplexResult {
