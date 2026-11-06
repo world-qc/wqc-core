@@ -27,6 +27,8 @@
 //! An input already in that order is not copied.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::engine::{EngineError, Gate};
 use ndarray::ArrayView2;
@@ -484,6 +486,88 @@ fn contract_pair(left: Tensor, right: Tensor, eval: bool) -> Result<(Tensor, u64
         }
     };
     Ok((Tensor { legs, data }, working))
+}
+
+/// Seconds this executor takes per byte and per flop, in the planner's counts
+/// (docs `work-budget.md` §1). A node turns a task's announced work into an
+/// expected time with them.
+#[derive(Clone, Copy, Debug)]
+pub struct TnRates {
+    pub seconds_per_byte: f64,
+    pub seconds_per_flop: f64,
+}
+
+static TN_RATES: OnceLock<Option<TnRates>> = OnceLock::new();
+
+/// Measured once per process; the first call takes about a second. `None`
+/// when a benchmark join fails, so a node does not judge work by a guess.
+pub fn tn_rates() -> Option<TnRates> {
+    *TN_RATES.get_or_init(measure_rates)
+}
+
+/// The planner's `traffic` and `flops` for one join: both inputs read and the
+/// result written, a reordered input copied once more; `2^(|left| + |right
+/// free|)` flops.
+fn join_cost(left: &[u32], right: &[u32]) -> (f64, f64) {
+    let shared: Vec<u32> = left.iter().copied().filter(|l| right.contains(l)).collect();
+    let free = |legs: &[u32]| -> Vec<u32> {
+        legs.iter()
+            .copied()
+            .filter(|l| !shared.contains(l))
+            .collect()
+    };
+    let (left_free, right_free) = (free(left), free(right));
+    let bytes = |legs: usize| (16u64 << legs) as f64;
+    let mut traffic =
+        bytes(left.len()) + bytes(right.len()) + bytes(left_free.len() + right_free.len());
+    if left != [&shared[..], &left_free].concat() {
+        traffic += 2.0 * bytes(left.len());
+    }
+    if right != [&shared[..], &right_free].concat() {
+        traffic += 2.0 * bytes(right.len());
+    }
+    (traffic, (1u64 << (left.len() + right_free.len())) as f64)
+}
+
+fn measure_rates() -> Option<TnRates> {
+    let tensor = |legs: &[u32]| Tensor {
+        legs: legs.to_vec(),
+        data: Some(
+            (0..1usize << legs.len())
+                .map(|i| Complex64::new((i % 7) as f64 * 0.1, 0.5))
+                .collect(),
+        ),
+    };
+    let fastest = |left: &[u32], right: &[u32]| -> Option<f64> {
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let (l, r) = (tensor(left), tensor(right));
+            let start = Instant::now();
+            if let Err(e) = contract_pair(l, r, true) {
+                eprintln!("contraction rate benchmark failed: {e}");
+                return None;
+            }
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        Some(best)
+    };
+    // A gate half absorbed into a 2^23 state whose shared leg sits mid-way, so
+    // the state is reordered: almost all traffic (512 MiB), few flops.
+    let state: Vec<u32> = (0..23).collect();
+    let half = [100, 11];
+    let (traffic, _) = join_cost(&half, &state);
+    let seconds_per_byte = fastest(&half, &state)? / traffic;
+    // Two 2^20 operands sharing 10 legs, both already in order: 2^30 flops.
+    // Its 48 MiB of traffic stay in the time, which errs slow.
+    let left: Vec<u32> = (0..10).chain(100..110).collect();
+    let right: Vec<u32> = (0..10).chain(200..210).collect();
+    let (_, flops) = join_cost(&left, &right);
+    let seconds_per_flop = fastest(&left, &right)? / flops;
+    let valid = |x: f64| x.is_finite() && x > 0.0;
+    (valid(seconds_per_byte) && valid(seconds_per_flop)).then_some(TnRates {
+        seconds_per_byte,
+        seconds_per_flop,
+    })
 }
 
 /// `C[i][j] = Σ_k A[i][k] B[j][k]` with `A` `m × k` and `B` `n × k`, row-major.
@@ -1320,6 +1404,26 @@ mod tests {
         );
         let got = contract_network(2, &gates, &tree, None).expect("network");
         assert_close(got, dense_zero(2, &gates));
+    }
+
+    #[test]
+    fn join_cost_matches_the_planner() {
+        // The orchestrator's TestNetworkJoinCountsTraffic: the left input has
+        // the shared edge last and is copied. 3 × 64 + 2 × 64 bytes, 2^3 flops.
+        assert_eq!(join_cost(&[1, 2], &[2, 3]), (320.0, 8.0));
+        // Already in order: no copy.
+        assert_eq!(join_cost(&[2, 1], &[2, 3]), (192.0, 8.0));
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "512 MiB benchmark; about a minute unoptimized"
+    )]
+    fn rates_are_measured() {
+        let rates = tn_rates().expect("rates");
+        assert!(rates.seconds_per_byte > 0.0 && rates.seconds_per_byte.is_finite());
+        assert!(rates.seconds_per_flop > 0.0 && rates.seconds_per_flop.is_finite());
     }
 
     #[test]

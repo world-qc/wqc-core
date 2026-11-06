@@ -168,6 +168,13 @@ pub struct SystemInfo {
     /// Adapter `max_buffer_size` when WebGPU is active (wgpu allocation ceiling ≈ VRAM proxy).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vram_budget_bytes: Option<u64>,
+    /// Measured at startup: seconds per byte of contraction traffic. Absent
+    /// when the measurement failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tn_seconds_per_byte: Option<f64>,
+    /// Measured at startup: seconds per contraction flop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tn_seconds_per_flop: Option<f64>,
 }
 
 fn validate_task(
@@ -700,6 +707,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
     );
 
     let tn = crate::tn::tn_engine_status();
+    let rates = crate::tn::tn_rates();
     let vram_budget_bytes = crate::tn::vram_budget_bytes_for_sysinfo();
 
     Json(SystemInfo {
@@ -712,6 +720,8 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         mps_max_bond_dim: tn.mps_max_bond_dim,
         pcs_memory_policy: PcsMemoryPolicy::from_env().as_str().to_string(),
         vram_budget_bytes,
+        tn_seconds_per_byte: rates.map(|r| r.seconds_per_byte),
+        tn_seconds_per_flop: rates.map(|r| r.seconds_per_flop),
     })
 }
 
