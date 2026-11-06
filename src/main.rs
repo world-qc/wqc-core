@@ -196,6 +196,17 @@ fn print_core_banner(mode: &str, addr: &str) {
     if let Some(note) = &tn.note {
         println!("    {:8} {}", "↳".dimmed(), note.italic().bright_black());
     }
+    // Measured before serving, so /sysinfo answers at once.
+    let rates = match crate::tn::tn_rates() {
+        Some(r) => format!(
+            "{:.2} GB/s traffic, {:.2} Gflop/s",
+            1e-9 / r.seconds_per_byte,
+            1e-9 / r.seconds_per_flop
+        )
+        .bright_cyan(),
+        None => "unavailable (nodes will not take announced work)".bright_red(),
+    };
+    println!("  ⏱ {:8} {}", "RATES".bold(), rates);
     #[cfg(feature = "webgpu")]
     if tn.active == "webgpu" {
         let side = crate::tn::gpu::gemm_min_side();
