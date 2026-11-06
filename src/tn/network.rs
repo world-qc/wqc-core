@@ -910,7 +910,7 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// The orchestrator's tree for the same grid once gates may split. It
+    /// The orchestrator's split-gate search tree for the same grid. It
     /// takes CNOTs as halves and peaks at 843776 B.
     const SPLIT_GRID_TREE_JSON: &str = include_str!("network_grid_4x4_d12_split.json");
     const SPLIT_GRID_TREE_SHA3: &str =
@@ -930,6 +930,34 @@ mod tests {
         );
         assert!(SPLIT_GRID_TREE_JSON.contains(r#"{"control":"#));
         assert_eq!(tree.peak_bytes, Some(843776));
+        let gates = grid(4, 12);
+        validate(16, &gates, &tree, None).expect("declared peak");
+        let got = contract_network(16, &gates, &tree, None).expect("network");
+        let expected = dense_zero(16, &gates);
+        assert!(expected.norm() > 0.1, "amplitude vanished: {expected}");
+        assert_close(got, expected);
+    }
+
+    /// The orchestrator's planned tree for the same grid: a recursive
+    /// bisection over the split gates. It peaks at 262144 B.
+    const BISECT_GRID_TREE_JSON: &str = include_str!("network_grid_4x4_d12_bisect.json");
+    const BISECT_GRID_TREE_SHA3: &str =
+        "6038f75c8c231db5e672af5b3eb22a95968a7aabd50b170029466267e364988a";
+
+    #[test]
+    fn orchestrator_bisection_tree_matches_dense() {
+        use sha3::{Digest, Sha3_256};
+        assert_eq!(
+            hex::encode(Sha3_256::digest(BISECT_GRID_TREE_JSON.as_bytes())),
+            BISECT_GRID_TREE_SHA3
+        );
+        let tree: ContractionTree = serde_json::from_str(BISECT_GRID_TREE_JSON).expect("parse");
+        assert_eq!(
+            serde_json::to_string(&tree).expect("json"),
+            BISECT_GRID_TREE_JSON
+        );
+        assert!(BISECT_GRID_TREE_JSON.contains(r#"{"control":"#));
+        assert_eq!(tree.peak_bytes, Some(262144));
         let gates = grid(4, 12);
         validate(16, &gates, &tree, None).expect("declared peak");
         let got = contract_network(16, &gates, &tree, None).expect("network");
