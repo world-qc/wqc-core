@@ -21,6 +21,7 @@ use tower_http::cors::CorsLayer;
 
 mod api;
 mod basis;
+mod cancel;
 mod distribution_proof;
 mod engine;
 mod expectation;

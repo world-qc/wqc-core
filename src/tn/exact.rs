@@ -416,6 +416,9 @@ fn apply_gate(
     gate: &Gate,
     eval: bool,
 ) -> Result<Live, EngineError> {
+    if eval {
+        crate::cancel::check()?;
+    }
     for wire in gate_wires(gate)? {
         if !wires.contains(&wire) {
             return Err(EngineError::ExecutionFailed(

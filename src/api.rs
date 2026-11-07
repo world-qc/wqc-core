@@ -290,8 +290,36 @@ fn validate_contraction_tree_task(task: &ComputeTask) -> Result<(), String> {
 
 /// PROVER ROLE: Pre-allocates workspace, runs tensor contraction, and generates a zk-STARK proof.
 pub async fn handle_compute(
-    Json(mut task): Json<ComputeTask>,
+    Json(task): Json<ComputeTask>,
 ) -> Result<Json<ComputeResponse>, (StatusCode, String)> {
+    // Off the async workers, so hyper can drop this future when the client
+    // closes the connection; the guard then cancels the computation.
+    let (_cancel_on_drop, flag) = crate::cancel::OnDrop::new();
+    tokio::task::spawn_blocking(move || {
+        let task_id = task.task_id.clone();
+        let result = crate::cancel::run(flag, || compute(task));
+        if let Err((_, reason)) = &result {
+            if reason.contains(crate::cancel::CANCELLED) {
+                println!(
+                    "{} Task {} cancelled: the client has gone",
+                    "✘".red(),
+                    task_id.bright_yellow()
+                );
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("compute task failed: {e}"),
+        )
+    })?
+    .map(Json)
+}
+
+fn compute(mut task: ComputeTask) -> Result<ComputeResponse, (StatusCode, String)> {
     println!(
         "{} Processing STARK-monitored task {} (slice {}) on Node {} — effective qubits {} (original {})...",
         "⚙".bright_cyan(),
@@ -509,6 +537,7 @@ pub async fn handle_compute(
         None
     };
 
+    crate::cancel::check().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let prover = StarkProver;
     let proof = prover
         .generate_proof(
@@ -555,7 +584,7 @@ pub async fn handle_compute(
         );
     }
 
-    Ok(Json(ComputeResponse {
+    Ok(ComputeResponse {
         task_id: task.task_id,
         status: "success".to_string(),
         result_type,
@@ -609,7 +638,7 @@ pub async fn handle_compute(
                 distribution_stark_status()
             },
         ),
-    }))
+    })
 }
 
 /// VALIDATOR ROLE: Instantly verifies a zk-STARK proof without re-running contraction.

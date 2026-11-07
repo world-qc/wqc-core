@@ -381,6 +381,7 @@ impl MpsState {
         u: &Mat4,
         ctrl_is_first: bool,
     ) -> Result<(), EngineError> {
+        crate::cancel::check()?;
         debug_assert_eq!(q, p + 1);
         #[cfg(feature = "webgpu")]
         if self.try_gpu_two_qubit(p, q, u, ctrl_is_first)? {
@@ -520,6 +521,7 @@ impl MpsState {
         &mut self,
         gates: &[Gate],
     ) -> Result<(), EngineError> {
+        crate::cancel::check()?;
         if gates.len() < 2 {
             for gate in gates {
                 self.apply_gate(gate)?;

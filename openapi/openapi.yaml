@@ -69,6 +69,11 @@ paths:
         failure is a `400`.
 
         One concurrent `/compute` per process is recommended.
+
+        Closing the connection cancels the request: core stops at the next
+        contraction step (a join of a network tree, a gate of a state tree or
+        an MPS) or before proving, and does not answer. A proof already under
+        way runs to the end.
       operationId: compute
       requestBody:
         required: true
