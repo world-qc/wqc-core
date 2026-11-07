@@ -208,6 +208,9 @@ fn walk(
     let mut peak = 0u64;
 
     for (index, node) in tree.nodes.iter().enumerate() {
+        if eval {
+            crate::cancel::check()?;
+        }
         let ContractionNode::Contract { left, right } = *node else {
             return Err(EngineError::ExecutionFailed(
                 "contraction tree mixes sweep steps and network contractions".into(),
@@ -1789,6 +1792,20 @@ mod tests {
             mps.apply_gate(gate).expect("apply");
         }
         assert_close(got, mps.amplitude_at_compact_zero());
+    }
+
+    #[test]
+    fn a_cancelled_contraction_stops() {
+        let n = 8usize;
+        let gates = brickwork(n, 4);
+        let tree = greedy_tree(n, &gates);
+        let (guard, flag) = crate::cancel::OnDrop::new();
+        drop(guard);
+        let err = crate::cancel::run(flag, || contract_network(n, &gates, &tree, None))
+            .expect_err("cancelled");
+        assert!(err.to_string().contains(crate::cancel::CANCELLED), "{err}");
+        // Outside a cancelled run the same tree contracts.
+        contract_network(n, &gates, &tree, None).expect("network");
     }
 
     #[test]
