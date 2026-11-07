@@ -41,6 +41,12 @@ use super::tree::{unitary_wires, ContractionKind, ContractionNode, ContractionTr
 /// Output bits a lookup table covers when legs are reordered.
 const PERMUTE_LOW_BITS: usize = 12;
 
+/// Most legs of a tensor that [`absorb`] folds into a large one.
+const ABSORB_LEGS: usize = 6;
+
+/// Fewest contiguous low bits [`absorb`] streams at a time.
+const ABSORB_RUN_BITS: usize = 6;
+
 /// Largest `min(m, n) · k` that [`matmul_small_side`] takes instead of GEMM.
 const SMALL_SIDE: usize = 64;
 
@@ -109,6 +115,7 @@ impl Network {
     }
 }
 
+#[derive(Clone)]
 struct Tensor {
     legs: Vec<u32>,
     data: Option<Vec<Complex64>>,
@@ -475,6 +482,36 @@ fn contract_pair(left: Tensor, right: Tensor, eval: bool) -> Result<(Tensor, u64
     let data = match (eval, left.data, right.data) {
         (false, _, _) => None,
         (true, Some(left_data), Some(right_data)) => {
+            let absorbed = if left.legs.len() <= ABSORB_LEGS && right.legs.len() > left.legs.len() {
+                absorb(
+                    &right_data,
+                    &right.legs,
+                    &left_data,
+                    &left.legs,
+                    &shared,
+                    true,
+                )
+            } else if right.legs.len() <= ABSORB_LEGS && left.legs.len() > right.legs.len() {
+                absorb(
+                    &left_data,
+                    &left.legs,
+                    &right_data,
+                    &right.legs,
+                    &shared,
+                    false,
+                )
+            } else {
+                None
+            };
+            if absorbed.is_some() {
+                return Ok((
+                    Tensor {
+                        legs,
+                        data: absorbed,
+                    },
+                    working,
+                ));
+            }
             let left_data = permute(left_data, &left.legs, &left_order);
             let right_data = permute(right_data, &right.legs, &right_order);
             let k = 1usize << shared.len();
@@ -554,8 +591,10 @@ fn measure_rates() -> Option<TnRates> {
         }
         Some(best)
     };
-    // A gate half absorbed into a 2^23 state whose shared leg sits mid-way, so
-    // the state is reordered: almost all traffic (512 MiB), few flops.
+    // A gate half absorbed into a 2^23 state whose shared leg sits mid-way:
+    // almost all traffic, few flops. The planner counts the state reordered
+    // (512 MiB) while `absorb` streams it in place, so the rate is per counted
+    // byte of the join a sweep tree is made of.
     let state: Vec<u32> = (0..23).collect();
     let half = [100, 11];
     let (traffic, _) = join_cost(&half, &state);
@@ -625,6 +664,92 @@ fn matmul_small_side(
         }
     }
     out
+}
+
+/// `contract_pair` of a large tensor and one of at most [`ABSORB_LEGS`] legs,
+/// such as a gate half absorbed into a state. The large tensor's free bits
+/// below its lowest shared bit are contiguous, so each run of them is read
+/// once in place instead of the whole tensor being reordered and multiplied.
+/// `None` when that run is shorter than `1 << ABSORB_RUN_BITS`. The result
+/// has the same legs as `contract_pair`: the right operand's free legs, then
+/// the left's, each in its own order.
+fn absorb(
+    big: &[Complex64],
+    big_legs: &[u32],
+    small: &[Complex64],
+    small_legs: &[u32],
+    shared: &[u32],
+    big_is_right: bool,
+) -> Option<Vec<Complex64>> {
+    let position = |leg: &u32| big_legs.iter().position(|l| l == leg);
+    let shared_bits: Vec<usize> = shared.iter().map(position).collect::<Option<_>>()?;
+    let run_bits = shared_bits.iter().copied().min().unwrap_or(big_legs.len());
+    if run_bits < ABSORB_RUN_BITS {
+        return None;
+    }
+    let small_free: Vec<u32> = small_legs
+        .iter()
+        .copied()
+        .filter(|leg| !shared.contains(leg))
+        .collect();
+    // Entry `s + (j << k)` is the small tensor at shared value `s`, free value `j`.
+    let small = permute(
+        small.to_vec(),
+        small_legs,
+        &[shared, &small_free[..]].concat(),
+    );
+    let outer_bits: Vec<usize> = (run_bits..big_legs.len())
+        .filter(|b| !shared_bits.contains(b))
+        .collect();
+    let offsets = scatter_table(&shared_bits);
+    let (k, nf, run) = (shared.len(), small_free.len(), 1usize << run_bits);
+    let base = |outer: usize| {
+        outer_bits
+            .iter()
+            .enumerate()
+            .filter(|(b, _)| (outer >> b) & 1 == 1)
+            .fold(0, |acc, (_, &place)| acc | 1usize << place)
+    };
+    // dst[r · stride] = Σ_s w[s] · big[at + offsets[s] + r] for r < run.
+    let fill = |dst: &mut [Complex64], stride: usize, at: usize, w: &[Complex64]| {
+        for (s, (&offset, &ws)) in offsets.iter().zip(w).enumerate() {
+            let src = &big[at + offset..at + offset + run];
+            match (s, stride) {
+                (0, 1) => dst.iter_mut().zip(src).for_each(|(d, &x)| *d = ws * x),
+                (_, 1) => dst.iter_mut().zip(src).for_each(|(d, &x)| *d += ws * x),
+                (0, _) => dst
+                    .iter_mut()
+                    .step_by(stride)
+                    .zip(src)
+                    .for_each(|(d, &x)| *d = ws * x),
+                _ => dst
+                    .iter_mut()
+                    .step_by(stride)
+                    .zip(src)
+                    .for_each(|(d, &x)| *d += ws * x),
+            }
+        }
+    };
+    let outers = 1usize << outer_bits.len();
+    let mut out = vec![Complex64::ZERO; (outers * run) << nf];
+    if big_is_right {
+        // out[(j << free) | (outer << run_bits) | r]
+        out.par_chunks_mut(run).enumerate().for_each(|(c, dst)| {
+            let (j, outer) = (c / outers, c % outers);
+            fill(dst, 1, base(outer), &small[j << k..(j + 1) << k]);
+        });
+    } else {
+        // out[(((outer << run_bits) | r) << nf) | j]
+        out.par_chunks_mut(run << nf)
+            .enumerate()
+            .for_each(|(outer, block)| {
+                let at = base(outer);
+                for j in 0..1usize << nf {
+                    fill(&mut block[j..], 1 << nf, at, &small[j << k..(j + 1) << k]);
+                }
+            });
+    }
+    Some(out)
 }
 
 /// Reorder legs `from` into `to`. Leg `p` of a tensor is bit `p` of its index.
@@ -1491,6 +1616,79 @@ mod tests {
         let rates = tn_rates().expect("rates");
         assert!(rates.seconds_per_byte > 0.0 && rates.seconds_per_byte.is_finite());
         assert!(rates.seconds_per_flop > 0.0 && rates.seconds_per_flop.is_finite());
+    }
+
+    #[test]
+    fn absorb_matches_reorder_and_multiply() {
+        // A 14-leg tensor with small ones sharing legs above the run, on
+        // either side, with zero to two free legs of their own.
+        let fill = |len: usize, seed: f64| -> Vec<Complex64> {
+            (0..len)
+                .map(|i| Complex64::new((i as f64 * seed).sin(), (i as f64 * seed).cos()))
+                .collect()
+        };
+        let big_legs: Vec<u32> = (0..14).map(|l| 13 - l).collect();
+        let big = Tensor {
+            legs: big_legs.clone(),
+            data: Some(fill(1 << 14, 0.37)),
+        };
+        for small_legs in [vec![4u32], vec![50, 6], vec![2, 51, 52], vec![3, 53, 0]] {
+            let small = Tensor {
+                legs: small_legs.clone(),
+                data: Some(fill(1 << small_legs.len(), 0.61)),
+            };
+            for big_is_right in [true, false] {
+                let (left, right) = if big_is_right {
+                    (&small, &big)
+                } else {
+                    (&big, &small)
+                };
+                let shared: Vec<u32> = left
+                    .legs
+                    .iter()
+                    .copied()
+                    .filter(|l| right.legs.contains(l))
+                    .collect();
+                let (got, _) = contract_pair(left.clone(), right.clone(), true).expect("pair");
+                let left_free: Vec<u32> = left
+                    .legs
+                    .iter()
+                    .copied()
+                    .filter(|l| !shared.contains(l))
+                    .collect();
+                let right_free: Vec<u32> = right
+                    .legs
+                    .iter()
+                    .copied()
+                    .filter(|l| !shared.contains(l))
+                    .collect();
+                let a = permute(
+                    left.data.clone().unwrap(),
+                    &left.legs,
+                    &[&shared[..], &left_free].concat(),
+                );
+                let b = permute(
+                    right.data.clone().unwrap(),
+                    &right.legs,
+                    &[&shared[..], &right_free].concat(),
+                );
+                let want = matmul_transposed(
+                    &a,
+                    &b,
+                    1 << left_free.len(),
+                    1 << shared.len(),
+                    1 << right_free.len(),
+                )
+                .expect("matmul");
+                assert_eq!(got.legs, [&right_free[..], &left_free].concat());
+                let got = got.data.expect("data");
+                assert_eq!(got.len(), want.len());
+                assert!(
+                    got.iter().zip(&want).all(|(x, y)| (x - y).norm() < 1e-9),
+                    "{small_legs:?} big_is_right {big_is_right}"
+                );
+            }
+        }
     }
 
     #[test]
