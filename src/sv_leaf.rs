@@ -58,7 +58,8 @@ fn pool() -> Result<&'static rayon::ThreadPool, Failure> {
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(0);
+            // Not 0: rayon would then read RAYON_NUM_THREADS, which main pins to 1.
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("sv-stark-{i}"))
