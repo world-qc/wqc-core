@@ -88,6 +88,9 @@ pub struct ComputeTask {
     /// Orchestrator security tier (`low|normal|high|ultra`); empty → FRI default (40).
     #[serde(default)]
     pub security_level: String,
+    /// Prove as a v2 (sv-stark) leaf of this many gate rows. Absent proves v1.
+    #[serde(default)]
+    pub sv_leaf_rows: Option<u64>,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -175,6 +178,15 @@ pub struct SystemInfo {
     /// Measured at startup: seconds per contraction flop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tn_seconds_per_flop: Option<f64>,
+    /// Measured at startup: seconds a v2 leaf takes per gate row. Absent when this core does
+    /// not prove v2 leaves; the memory estimate below comes with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_seconds_per_row: Option<f64>,
+    /// A v2 leaf takes about `sv_base_bytes + sv_bytes_per_row × rows` to prove.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_bytes_per_row: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_base_bytes: Option<u64>,
 }
 
 fn validate_task(
@@ -329,6 +341,10 @@ fn compute(mut task: ComputeTask) -> Result<ComputeResponse, (StatusCode, String
         task.qubit_count,
         task.original_qubit_count,
     );
+
+    if let Some(rows) = task.sv_leaf_rows.filter(|&r| r > 0) {
+        return crate::sv_leaf::compute(task, rows);
+    }
 
     let logical_spec_hash = committed_measurement_spec_hash(&task.circuit);
     if task.contraction_tree.is_some() {
@@ -738,6 +754,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
     let tn = crate::tn::tn_engine_status();
     let rates = crate::tn::tn_rates();
     let vram_budget_bytes = crate::tn::vram_budget_bytes_for_sysinfo();
+    let sv_seconds_per_row = crate::sv_leaf::seconds_per_row();
 
     Json(SystemInfo {
         system_memory_used_kb: sys.used_memory() / 1024,
@@ -751,6 +768,9 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         vram_budget_bytes,
         tn_seconds_per_byte: rates.map(|r| r.seconds_per_byte),
         tn_seconds_per_flop: rates.map(|r| r.seconds_per_flop),
+        sv_seconds_per_row,
+        sv_bytes_per_row: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BYTES_PER_ROW),
+        sv_base_bytes: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BASE_BYTES),
     })
 }
 

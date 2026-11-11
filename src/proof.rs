@@ -35,6 +35,9 @@ pub struct PublicInputs {
     /// Orchestrator security tier for FRI query selection; empty → default (40).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub security_level: String,
+    /// A v2 leaf's terminal-state digest (4 Goldilocks words); empty for a v1 proof.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sv_digest: Vec<u64>,
 }
 
 /// Returns `hash` when it is a 64-char ASCII hex digest; otherwise empty (legacy test fixtures).
@@ -174,6 +177,7 @@ impl StarkProver {
                 output_result_hash: output_hash.to_string(),
                 measurement_spec_hash: measurement_spec_hash.to_string(),
                 security_level: security_level.to_string(),
+                sv_digest: Vec::new(),
             },
             stark_proof_b64,
         })

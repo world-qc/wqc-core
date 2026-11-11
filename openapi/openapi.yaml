@@ -595,6 +595,20 @@ components:
           description: |
             Orchestrator tier (`low`, `normal`, `high`, `ultra`) selecting FRI
             query count. Empty or absent uses the engine default (40).
+        sv_leaf_rows:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 1
+          description: |
+            Prove as a v2 (sv-stark) leaf of this many gate rows
+            (`spec/p2p-protocols.md` §6.1). Only for an unsliced
+            `sample_counts` sub-task with terminal measurements and no noise,
+            tree or time split; must equal the circuit's gate rows. The counts
+            then come from the leaf's integer sampler, and the response
+            carries `public_inputs.sv_digest`, a v2 proof in
+            `stark_proof_b64`, `proof_scope` `sv_stark_v2`, and no
+            `distribution_proof`. Absent proves v1.
 
     SampleResult:
       type: object
@@ -651,6 +665,14 @@ components:
         security_level:
           type: string
           description: Omitted when the engine default applies
+        sv_digest:
+          type: array
+          description: |
+            A v2 leaf's terminal-state digest, 4 Goldilocks words; omitted for
+            a v1 proof.
+          items:
+            type: integer
+            format: int64
 
     Proof:
       type: object
@@ -845,3 +867,18 @@ components:
           description: |
             Measured once at startup: seconds per contraction flop, in the
             planner's count (`spec/work-budget.md` §1).
+        sv_seconds_per_row:
+          type: number
+          format: double
+          description: |
+            Measured once at startup by proving a small v2 leaf: seconds per
+            gate row. Absent, with the two fields below, when this core does
+            not prove v2 leaves (`WQC_SV_STARK_V2=0`) or the measurement
+            failed. `wqc-node` sizes its `sv_max_rows` from these.
+        sv_bytes_per_row:
+          type: integer
+          format: int64
+          description: A v2 leaf takes about `sv_base_bytes + sv_bytes_per_row × rows` to prove
+        sv_base_bytes:
+          type: integer
+          format: int64
