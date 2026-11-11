@@ -30,6 +30,7 @@ mod mid_circuit;
 mod noise;
 mod proof;
 mod sample;
+mod sv_leaf;
 mod tn;
 mod trajectory_proof;
 
@@ -208,6 +209,11 @@ fn print_core_banner(mode: &str, addr: &str) {
         None => "unavailable (nodes will not take announced work)".bright_red(),
     };
     println!("  ⏱ {:8} {}", "RATES".bold(), rates);
+    let sv = match crate::sv_leaf::seconds_per_row() {
+        Some(s) => format!("{:.0} µs per gate row", s * 1e6).bright_cyan(),
+        None => "off (nodes will not advertise v2 leaves)".bright_red(),
+    };
+    println!("  ⏱ {:8} {}", "SV-STARK".bold(), sv);
     #[cfg(feature = "webgpu")]
     if tn.active == "webgpu" {
         let side = crate::tn::gpu::gemm_min_side();

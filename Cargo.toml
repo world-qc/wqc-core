@@ -18,6 +18,10 @@ rayon = "1.8"
 nalgebra = "0.33"
 # zk-STARKs Engine Integration
 wqc-stark-engine = { git = "https://github.com/world-qc/wqc-stark-engine.git", branch = "main", package = "wqc-stark-core", features = ["plonky3-stark"] }
+# v2 (sv-stark) leaves: the prover the orchestrator's FFI verifier is built from.
+wqc-sv-stark = { git = "https://github.com/world-qc/wqc-stark-engine.git", branch = "main" }
+# wqc-sv-stark's field version, to read its Goldilocks statement as integers.
+p3-field-sv = { package = "p3-field", version = "=0.9.0-rc.2" }
 p3-field = "0.6.1"
 p3-mersenne-31 = "0.6.1"
 # Utilities
@@ -49,8 +53,20 @@ webgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 # Sibling-repo local override — checkout `wqc-stark-engine/` next to `wqc-core/` (Docker build uses the same sibling layout).
 [patch."https://github.com/world-qc/wqc-stark-engine.git"]
 wqc-stark-core = { path = "../wqc-stark-engine/wqc-stark-core" }
+wqc-sv-stark = { path = "../wqc-stark-engine/wqc-sv-stark" }
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Plonky3-recursion's crates (under wqc-sv-stark) are large; a single codegen unit takes most
+# of an hour each.
+[profile.release.package.p3-recursion]
+codegen-units = 16
+
+[profile.release.package.p3-circuit]
+codegen-units = 16
+
+[profile.release.package.p3-circuit-prover]
+codegen-units = 16

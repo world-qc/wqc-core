@@ -4,6 +4,7 @@
 #   parent/
 #     wqc-core/          ← this Dockerfile
 #     wqc-stark-engine/wqc-stark-core/
+#     wqc-stark-engine/wqc-sv-stark/
 #
 # From the parent directory:
 #   docker build --platform linux/amd64 -f wqc-core/Dockerfile \
@@ -13,7 +14,8 @@
 # cross-compiles to amd64. Full linux/amd64 under QEMU SIGSEGVs in collect2/cc
 # (same pattern as wqc-composer / wqc-p2p-proxy).
 #
-# Uses Cargo.toml [patch] → ../wqc-stark-engine/wqc-stark-core (no git fetch).
+# Uses Cargo.toml [patch] → ../wqc-stark-engine/wqc-stark-core and wqc-sv-stark (no git fetch
+# of the engine; Plonky3-recursion still comes from git).
 
 FROM --platform=$BUILDPLATFORM rust:1.95-slim-bookworm AS builder
 
@@ -31,10 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fi) \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# /build/wqc-core + /build/wqc-stark-engine/wqc-stark-core (patch path)
+# /build/wqc-core + /build/wqc-stark-engine/{wqc-stark-core,wqc-sv-stark} (patch paths)
 WORKDIR /build/wqc-core
 
 COPY wqc-stark-engine/wqc-stark-core /build/wqc-stark-engine/wqc-stark-core
+COPY wqc-stark-engine/wqc-sv-stark /build/wqc-stark-engine/wqc-sv-stark
 
 COPY wqc-core/Cargo.toml wqc-core/Cargo.lock* ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -56,6 +59,7 @@ RUN set -eux; \
 
 COPY wqc-core/src ./src
 COPY wqc-stark-engine/wqc-stark-core /build/wqc-stark-engine/wqc-stark-core
+COPY wqc-stark-engine/wqc-sv-stark /build/wqc-stark-engine/wqc-sv-stark
 
 RUN set -eux; \
     if [ "$TARGETARCH" = "amd64" ] && [ "$BUILDARCH" != "amd64" ]; then \

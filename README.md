@@ -52,6 +52,8 @@ is described in [wqc-docs `spec/architecture-current.md` §3](https://github.com
 | `WQC_MAX_MEMORY_GB` | (unset) | PCS memory budget (GiB); unset disables the gate |
 | `WQC_PCS_MEMORY_POLICY` | `refuse` | `refuse` (fail prove) or `spill` (auto-lower Mmcs chunk) when over budget. Exposed to nodes via `GET /sysinfo` → `pcs_memory_policy` for open-call bid eligibility. |
 | `WQC_PCS_MMCS_GROUP_CHUNK` | `24` | Mmcs group chunk size for leaf/agg PCS prove (time vs wire trade-off) |
+| `WQC_SV_STARK_V2` | on | `0`, `false` or `off`: do not prove v2 (sv-stark) leaves. `/sysinfo` then reports no `sv_seconds_per_row`, so the node does not advertise them |
+| `WQC_SV_THREADS` | all cores | Threads v2 leaves prove on (their own pool; the global pool stays at `RAYON_NUM_THREADS`) |
 | `RAYON_NUM_THREADS` | `1` | Worker threads for prove (lower on memory-constrained hosts) |
 
 Memory per slice: `≈ N · χ² · 32` bytes. Orchestrator may send a lower `mps_max_bond_dim` per task.
