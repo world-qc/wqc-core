@@ -47,10 +47,22 @@ fn internal(m: impl Into<String>) -> Failure {
 /// Whether this core proves v2 leaves (`WQC_SV_STARK_V2`, default on). Off, it reports no
 /// rate, so its node does not advertise them.
 fn enabled() -> bool {
-    !matches!(
-        std::env::var("WQC_SV_STARK_V2").as_deref().map(str::trim),
+    !env_off("WQC_SV_STARK_V2")
+}
+
+fn env_off(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref().map(str::trim),
         Ok("0" | "false" | "off")
     )
+}
+
+/// `/sysinfo`'s `sv_dynamic`: with a v2 rate, this core also proves mid-circuit circuits,
+/// unless `WQC_SV_DYNAMIC` turns that off (mid-circuit leaves carry ancillas and run heavier,
+/// so an operator can withdraw them alone). Without a rate it is absent, so the node sets
+/// neither bit 5 nor bit 6.
+pub fn sv_dynamic(rate: Option<f64>) -> Option<bool> {
+    rate.map(|_| !env_off("WQC_SV_DYNAMIC"))
 }
 
 /// The pool v2 leaves prove on: every core (`WQC_SV_THREADS` to cap it). The global pool is
@@ -319,6 +331,12 @@ mod tests {
     fn measures_a_rate() {
         let rate = seconds_per_row().expect("rate");
         assert!(rate > 0.0 && rate < 1.0, "{rate}");
+    }
+
+    #[test]
+    fn sv_dynamic_follows_the_rate() {
+        assert_eq!(sv_dynamic(None), None);
+        assert_eq!(sv_dynamic(Some(1e-5)), Some(true));
     }
 
     #[test]
