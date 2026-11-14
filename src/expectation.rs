@@ -131,8 +131,12 @@ fn apply_pauli_string(index: usize, label: &str) -> Result<(usize, Complex64), E
     Ok((j, phase))
 }
 
-/// ⟨ψ|P|ψ⟩ for a single Pauli string P. With `P|i⟩ = phase_i |j⟩`, it is
-/// `Σ_i conj(ψ_j) · phase_i · ψ_i`.
+/// ⟨ψ|P|ψ⟩ for a single Pauli string P. With `P|i⟩ = phase_i |P(i)⟩`, it is
+/// `Σ_i conj(ψ_{P(i)}) · phase_i · ψ_i`, as wqc-sv-stark's `outputs::pauli_expectation`.
+///
+/// The sum is real: `i ↦ P(i)` is an involution (X and Y flip bits) and
+/// `phase_{P(i)} = conj(phase_i)` (Y gives `i` and `−i`, the others are real), so the terms for
+/// `i` and `P(i)` are conjugates. Only rounding leaves an imaginary part, which is dropped.
 pub fn pauli_string_expectation(
     statevector: &[Complex64],
     label: &str,
@@ -154,6 +158,11 @@ pub fn pauli_string_expectation(
         let (j, phase) = apply_pauli_string(i, label)?;
         sum += statevector[j].conj() * phase * statevector[i];
     }
+    debug_assert!(
+        sum.im.abs() < 1e-9,
+        "⟨ψ|{label}|ψ⟩ has imaginary part {}",
+        sum.im
+    );
     Ok(sum.re)
 }
 
@@ -330,7 +339,46 @@ mod tests {
                 "⟨Y⟩ = {}, want {want}",
                 y0.real
             );
+            assert!(y0.imag.abs() < 1e-12);
         }
+    }
+
+    /// Two qubits fix the bit flips and phases together. On (|00⟩ + i|11⟩)/√2 one Y with one X,
+    /// in either order, is +1 (the old formula gave −1). On the real Bell state YY is −1 under
+    /// either formula: an even number of Y keeps its sign.
+    #[test]
+    fn y_on_two_qubits_follows_bit_order_and_parity() {
+        let expect = |gates: Vec<Gate>, label: &str| -> f64 {
+            let mut workspace = ContractionWorkspace::try_allocate(2, 2).expect("allocate");
+            let mut circuit = Circuit::new(2);
+            for g in gates {
+                circuit.add(g).expect("gate");
+            }
+            circuit
+                .execute_with_trace(workspace.register_mut())
+                .expect("unitary");
+            let obs = vec![ObservableSpec {
+                id: "O".into(),
+                terms: vec![PauliTerm {
+                    label: label.into(),
+                    coeff: ComplexCoeff {
+                        real: 1.0,
+                        imag: 0.0,
+                    },
+                }],
+            }];
+            let result = compute_expectations(workspace.register_mut(), &obs).expect("exp");
+            let v = result.values.get("O").expect("O");
+            assert!(v.imag.abs() < 1e-12, "{label}: imag {}", v.imag);
+            v.real
+        };
+        let complex_bell = || vec![Gate::H(0), Gate::S(0), Gate::CNOT(0, 1)];
+        for label in ["XY", "YX"] {
+            let got = expect(complex_bell(), label);
+            assert!((got - 1.0).abs() < 1e-9, "⟨{label}⟩ = {got}, want 1");
+        }
+        let got = expect(vec![Gate::H(0), Gate::CNOT(0, 1)], "YY");
+        assert!((got + 1.0).abs() < 1e-9, "⟨YY⟩ = {got}, want -1");
     }
 
     #[test]

@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn x_and_y_expectation_via_pauli_labels() {
+    fn x_and_z_expectation_via_pauli_labels() {
         let mut workspace = ContractionWorkspace::try_allocate(1, 1).expect("allocate");
         let mut circuit = Circuit::new(1);
         circuit.add(Gate::H(0)).expect("h");
