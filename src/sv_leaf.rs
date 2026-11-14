@@ -181,6 +181,31 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
 fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure> {
     let (level, circuit) = check_unitary(&task, rows)?;
     let n = task.qubit_count;
+    // Observables are checked before proving, so a bad label costs no proof.
+    let observables: Vec<(String, Vec<outputs::PauliTerm>)> =
+        if task.output_mode == OutputMode::Expectation {
+            task.observables
+                .iter()
+                .map(|obs| {
+                    let terms: Vec<outputs::PauliTerm> = obs
+                        .terms
+                        .iter()
+                        .map(|t| outputs::PauliTerm {
+                            label: t.label.clone(),
+                            coeff: outputs::Coeff {
+                                real: t.coeff.real,
+                                imag: t.coeff.imag,
+                            },
+                        })
+                        .collect();
+                    outputs::check_terms(n, &terms)
+                        .map_err(|e| bad_request(format!("observable {}: {e}", obs.id)))?;
+                    Ok((obs.id.clone(), terms))
+                })
+                .collect::<Result<_, Failure>>()?
+        } else {
+            Vec::new()
+        };
     let start = Instant::now();
     let (lp, fin) = pool()?.install(|| {
         let leaf = leaf::build(level, n, circuit.gates.clone())
@@ -196,7 +221,8 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
         let lp = leaf
             .prove(ctx)
             .map_err(|e| internal(format!("v2 leaf: {e}")))?;
-        // The leaf executes the same fused gates; its digest is this state's.
+        // The leaf does not hand back its final state, so the same fused gates run once
+        // more (cheap next to the proof); the digest check below ties the two together.
         let fin = wqc_sv_stark::exec::execute(n, &circuit.gates).1;
         Ok::<_, Failure>((lp, fin))
     })?;
@@ -215,21 +241,10 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
     let complex_result = ComplexResult { real, imag };
     let expectation_result = if task.output_mode == OutputMode::Expectation {
         let mut values = std::collections::BTreeMap::new();
-        for obs in &task.observables {
-            let terms: Vec<outputs::PauliTerm> = obs
-                .terms
-                .iter()
-                .map(|t| outputs::PauliTerm {
-                    label: t.label.clone(),
-                    coeff: outputs::Coeff {
-                        real: t.coeff.real,
-                        imag: t.coeff.imag,
-                    },
-                })
-                .collect();
-            let (real, imag) = outputs::observable(&fin, n, &terms)
-                .map_err(|e| bad_request(format!("observable {}: {e}", obs.id)))?;
-            values.insert(obs.id.clone(), ComplexResult { real, imag });
+        for (id, terms) in &observables {
+            let (real, imag) = outputs::observable(&fin, n, terms)
+                .map_err(|e| bad_request(format!("observable {id}: {e}")))?;
+            values.insert(id.clone(), ComplexResult { real, imag });
         }
         Some(ExpectationResult { values })
     } else {
@@ -659,6 +674,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An observable with a bad label is rejected before anything is proved.
+    #[test]
+    fn rejects_a_bad_observable_before_proving() {
+        use crate::expectation::{ComplexCoeff, ObservableSpec, PauliTerm};
+        let mut t = task(0);
+        t.output_mode = OutputMode::Expectation;
+        t.classical_bit_count = None;
+        t.shots = None;
+        t.sample_seed = None;
+        t.circuit = vec![Gate::H(0), Gate::CNOT(0, 1)];
+        t.observables = vec![ObservableSpec {
+            id: "short".into(),
+            terms: vec![PauliTerm {
+                label: "Z".into(),
+                coeff: ComplexCoeff {
+                    real: 1.0,
+                    imag: 0.0,
+                },
+            }],
+        }];
+        let json = serde_json::to_string(&t.circuit).expect("json");
+        let c = wire::parse_circuit(&json).expect("circuit");
+        let rows = leaf::gate_rows(2, &c.gates).expect("rows") as u64;
+        let err = compute(t, rows).err().expect("bad label");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("observable short"), "{}", err.1);
     }
 
     /// A mid-circuit circuit proves as its rewritten circuit, and the orchestrator's verifier,
