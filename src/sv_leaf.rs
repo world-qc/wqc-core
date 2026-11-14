@@ -18,10 +18,12 @@ use axum::http::StatusCode;
 use base64::{engine::general_purpose, Engine as _};
 use wqc_sv_stark::born::Sampling;
 use wqc_sv_stark::leaf::{self, Dispatch};
-use wqc_sv_stark::{wire, SecurityLevel};
+use wqc_sv_stark::{outputs, wire, SecurityLevel};
 
 use crate::api::{ComputeResponse, ComputeTask, WorkReport};
+use crate::engine::calculate_complex_result_hash;
 use crate::engine::ComplexResult;
+use crate::expectation::{calculate_expectation_result_hash, ExpectationResult};
 use crate::proof::{Proof, PublicInputs};
 use crate::sample::{calculate_sample_result_hash, OutputMode, SampleResult};
 
@@ -88,10 +90,14 @@ fn pool() -> Result<&'static rayon::ThreadPool, Failure> {
     .ok_or_else(|| internal("sv-stark thread pool unavailable"))
 }
 
-/// Proves `task` as a v2 sampling leaf of `rows` gate rows.
+/// Proves `task` as a v2 leaf of `rows` gate rows: a sampling leaf for `sample_counts`, a
+/// unitary leaf for `statevector_scalar` and `expectation`.
 pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure> {
     if !enabled() {
         return Err(bad_request("this core does not prove v2 leaves"));
+    }
+    if task.output_mode != OutputMode::SampleCounts {
+        return compute_unitary(task, rows);
     }
     let checked = Checked::from_task(&task, rows)?;
     let start = Instant::now();
@@ -134,6 +140,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
             sv_digest,
         },
         stark_proof_b64: general_purpose::STANDARD.encode(&proof_bytes),
+        sv_state_b64: String::new(),
     };
     println!(
         "v2 leaf proved for task {}: {} rows, {} ms, {} proof bytes",
@@ -165,6 +172,152 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
         proof,
         distribution_proof: None,
     })
+}
+
+/// Proves a `statevector_scalar` or `expectation` task as a v2 unitary leaf. The leaf binds
+/// the final state's digest only, so the response carries the final state itself
+/// (`sv_state_b64`, `wqc_sv_stark::outputs`), from which the orchestrator checks the digest
+/// and computes the values; they are computed here the same way.
+fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure> {
+    let (level, circuit) = check_unitary(&task, rows)?;
+    let n = task.qubit_count;
+    let start = Instant::now();
+    let (lp, fin) = pool()?.install(|| {
+        let leaf = leaf::build(level, n, circuit.gates.clone())
+            .map_err(|e| bad_request(format!("v2 leaf: {e}")))?;
+        crate::cancel::check().map_err(|e| internal(e.to_string()))?;
+        let ctx = Dispatch {
+            circuit_id: &task.circuit_id,
+            sub_task_id: &task.task_id,
+            node_id: &task.node_id,
+            slice_id: &task.slice_id,
+        }
+        .context();
+        let lp = leaf
+            .prove(ctx)
+            .map_err(|e| internal(format!("v2 leaf: {e}")))?;
+        // The leaf executes the same fused gates; its digest is this state's.
+        let fin = wqc_sv_stark::exec::execute(n, &circuit.gates).1;
+        Ok::<_, Failure>((lp, fin))
+    })?;
+    let prove_wall_ms = start.elapsed().as_millis() as u64;
+
+    let sv_digest: Vec<u64> = lp.statement[4..leaf::STATEMENT_LEN]
+        .iter()
+        .map(p3_field_sv::PrimeField64::as_canonical_u64)
+        .collect();
+    if sv_digest != wqc_sv_stark::digest::terminal_digest(&fin) {
+        return Err(internal(
+            "v2 leaf: the proved digest is not the executed state's",
+        ));
+    }
+    let (real, imag) = outputs::amplitude_zero(&fin);
+    let complex_result = ComplexResult { real, imag };
+    let expectation_result = if task.output_mode == OutputMode::Expectation {
+        let mut values = std::collections::BTreeMap::new();
+        for obs in &task.observables {
+            let terms: Vec<outputs::PauliTerm> = obs
+                .terms
+                .iter()
+                .map(|t| outputs::PauliTerm {
+                    label: t.label.clone(),
+                    coeff: outputs::Coeff {
+                        real: t.coeff.real,
+                        imag: t.coeff.imag,
+                    },
+                })
+                .collect();
+            let (real, imag) = outputs::observable(&fin, n, &terms)
+                .map_err(|e| bad_request(format!("observable {}: {e}", obs.id)))?;
+            values.insert(obs.id.clone(), ComplexResult { real, imag });
+        }
+        Some(ExpectationResult { values })
+    } else {
+        None
+    };
+    let (result_type, output_result_hash) = match &expectation_result {
+        Some(e) => ("expectation", calculate_expectation_result_hash(e)),
+        None => (
+            "statevector_scalar",
+            calculate_complex_result_hash(&complex_result),
+        ),
+    };
+    let proof_bytes = leaf::encode_proof(&lp.proof);
+    let proof = Proof {
+        public_inputs: PublicInputs {
+            circuit_id: task.circuit_id.clone(),
+            sub_task_id: task.task_id.clone(),
+            node_id: task.node_id.clone(),
+            slice_id: task.slice_id.clone(),
+            output_result_hash,
+            measurement_spec_hash: String::new(),
+            security_level: task.security_level.clone(),
+            sv_digest,
+        },
+        stark_proof_b64: general_purpose::STANDARD.encode(&proof_bytes),
+        sv_state_b64: general_purpose::STANDARD.encode(outputs::encode_state(&fin)),
+    };
+    println!(
+        "v2 unitary leaf proved for task {}: {} rows, {} ms, {} proof bytes",
+        task.task_id,
+        rows,
+        prove_wall_ms,
+        proof_bytes.len()
+    );
+    Ok(ComputeResponse {
+        task_id: task.task_id,
+        status: "success".to_string(),
+        result_type: result_type.to_string(),
+        complex_result,
+        sample_result: None,
+        expectation_result,
+        work_report: WorkReport {
+            trace_rows: rows,
+            gate_count: circuit.gates.len() as u32,
+            compute_wall_ms: 0,
+            prove_wall_ms,
+            proof_bytes: proof.stark_proof_b64.len() as u64,
+            tn_backend: String::new(),
+            vram_peak_bytes: 0,
+            proof_scope: PROOF_SCOPE.to_string(),
+        },
+        proof,
+        distribution_proof: None,
+    })
+}
+
+/// A `statevector_scalar` or `expectation` dispatch checked against what a v2 unitary leaf
+/// proves: unsliced, no tree or time split, no noise, no MEASURE, `rows` gate rows.
+fn check_unitary(task: &ComputeTask, rows: u64) -> Result<(SecurityLevel, wire::Circuit), Failure> {
+    if !task.slice_assignments.is_empty()
+        || task.contraction_tree.is_some()
+        || task.mps_time_split.is_some()
+    {
+        return Err(bad_request(
+            "a v2 leaf is an unsliced sub-task without a tree or time split",
+        ));
+    }
+    if task.noise_model.is_some() {
+        return Err(bad_request("a v2 leaf has no noise model"));
+    }
+    let level = SecurityLevel::parse(&task.security_level)
+        .ok_or_else(|| bad_request(format!("unknown security level {:?}", task.security_level)))?;
+    let json = serde_json::to_string(&task.circuit)
+        .map_err(|e| bad_request(format!("circuit JSON: {e}")))?;
+    let circuit = wire::parse_circuit(&json).map_err(|e| bad_request(e.to_string()))?;
+    if !circuit.measures.is_empty() {
+        return Err(bad_request(
+            "a statevector_scalar or expectation leaf has no MEASURE",
+        ));
+    }
+    let want = leaf::gate_rows(task.qubit_count, &circuit.gates)
+        .map_err(|e| bad_request(e.to_string()))?;
+    if want as u64 != rows {
+        return Err(bad_request(format!(
+            "sv_leaf_rows {rows}, but the circuit has {want} gate rows"
+        )));
+    }
+    Ok((level, circuit))
 }
 
 /// A dispatch checked against what a v2 sampling leaf proves.
@@ -424,6 +577,88 @@ mod tests {
         assert!(verifier
             .verify_sampling(proof.as_slice(), &other, digest, 0xDEADBEEF, &counts)
             .is_err());
+    }
+
+    /// A scalar and an expectation task prove as unitary leaves; the published state hashes
+    /// to the proved digest and gives the reported values, as the orchestrator checks.
+    #[test]
+    fn proves_scalar_and_expectation_leaves() {
+        use crate::expectation::{ComplexCoeff, ObservableSpec, PauliTerm};
+        for mode in [OutputMode::StatevectorScalar, OutputMode::Expectation] {
+            let mut t = task(0);
+            t.output_mode = mode;
+            t.classical_bit_count = None;
+            t.shots = None;
+            t.sample_seed = None;
+            t.circuit = vec![Gate::H(0), Gate::S(0), Gate::CNOT(0, 1), Gate::RY(1, 0.3)];
+            t.observables = vec![ObservableSpec {
+                id: "xy".into(),
+                terms: vec![PauliTerm {
+                    label: "XY".into(),
+                    coeff: ComplexCoeff {
+                        real: 1.0,
+                        imag: 0.0,
+                    },
+                }],
+            }];
+            let json = serde_json::to_string(&t.circuit).expect("json");
+            let c = wire::parse_circuit(&json).expect("circuit");
+            let rows = leaf::gate_rows(2, &c.gates).expect("rows") as u64;
+            let response = compute(t, rows).expect("v2 leaf");
+
+            let pi = &response.proof.public_inputs;
+            let digest: [u64; 4] = pi.sv_digest.clone().try_into().expect("4 words");
+            let state = general_purpose::STANDARD
+                .decode(&response.proof.sv_state_b64)
+                .expect("base64");
+            let fin = outputs::check_state(&state, 2, digest).expect("state hashes to the digest");
+            let (re, im) = outputs::amplitude_zero(&fin);
+            assert_eq!(
+                (response.complex_result.real, response.complex_result.imag),
+                (re, im)
+            );
+
+            let verifier =
+                leaf::build_verifier(SecurityLevel::Low, 2, c.gates, None).expect("verifier");
+            let proof = general_purpose::STANDARD
+                .decode(&response.proof.stark_proof_b64)
+                .expect("base64");
+            let dispatch = Dispatch {
+                circuit_id: "circuit-fixture",
+                sub_task_id: "sub-fixture",
+                node_id: "node-fixture",
+                slice_id: "0",
+            };
+            verifier
+                .verify_dispatch(proof.as_slice(), &dispatch, digest)
+                .expect("the orchestrator's check passes");
+
+            match mode {
+                OutputMode::Expectation => {
+                    assert_eq!(response.result_type, "expectation");
+                    let e = response.expectation_result.expect("values");
+                    let terms = [outputs::PauliTerm {
+                        label: "XY".into(),
+                        coeff: outputs::Coeff {
+                            real: 1.0,
+                            imag: 0.0,
+                        },
+                    }];
+                    let (re, im) = outputs::observable(&fin, 2, &terms).expect("value");
+                    let v = &e.values["xy"];
+                    assert_eq!((v.real, v.imag), (re, im));
+                    assert_eq!(pi.output_result_hash, calculate_expectation_result_hash(&e));
+                }
+                _ => {
+                    assert_eq!(response.result_type, "statevector_scalar");
+                    assert!(response.expectation_result.is_none());
+                    assert_eq!(
+                        pi.output_result_hash,
+                        calculate_complex_result_hash(&response.complex_result)
+                    );
+                }
+            }
+        }
     }
 
     /// A mid-circuit circuit proves as its rewritten circuit, and the orchestrator's verifier,

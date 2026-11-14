@@ -602,11 +602,13 @@ components:
           minimum: 1
           description: |
             Prove as a v2 (sv-stark) leaf of this many gate rows
-            (`spec/p2p-protocols.md` §6.1). Only for an unsliced
-            `sample_counts` sub-task with terminal measurements and no noise,
-            tree or time split; must equal the circuit's gate rows. The counts
-            then come from the leaf's integer sampler, and the response
-            carries `public_inputs.sv_digest`, a v2 proof in
+            (`spec/p2p-protocols.md` §6.1). Only for an unsliced sub-task with
+            no noise, tree or time split; must equal the circuit's gate rows.
+            For `sample_counts` the counts come from the leaf's integer
+            sampler. For `statevector_scalar` and `expectation` (no MEASURE)
+            the leaf is unitary and the response also carries the final state
+            in `proof.sv_state_b64`, from which the values are computed. The
+            response carries `public_inputs.sv_digest`, a v2 proof in
             `stark_proof_b64`, `proof_scope` `sv_stark_v2`, and no
             `distribution_proof`. Absent proves v1.
 
@@ -683,6 +685,13 @@ components:
         stark_proof_b64:
           type: string
           description: Base64 STARK transcript
+        sv_state_b64:
+          type: string
+          description: |
+            A v2 `statevector_scalar` or `expectation` leaf's final state,
+            base64: `16 · 2^qubit_count` bytes, each amplitude `re` then `im`
+            as `i64` little-endian in units of `2^-28`. It hashes to
+            `public_inputs.sv_digest`. Omitted otherwise.
 
     WorkReport:
       type: object
@@ -882,3 +891,9 @@ components:
         sv_base_bytes:
           type: integer
           format: int64
+        sv_dynamic:
+          type: boolean
+          description: With the v2 rate, whether this core also proves mid-circuit circuits (`WQC_SV_DYNAMIC=0` reports false); the node advertises capability bit 6
+        sv_state_outputs:
+          type: boolean
+          description: With the v2 rate, this core also proves `statevector_scalar` and `expectation` as v2 leaves and publishes their final state; the node advertises capability bit 7

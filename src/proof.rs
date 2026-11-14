@@ -17,6 +17,11 @@ use wqc_stark_engine::{
 pub struct Proof {
     pub public_inputs: PublicInputs,
     pub stark_proof_b64: String,
+    /// A v2 unitary leaf's final state (`wqc_sv_stark::outputs` bytes), base64: what the
+    /// orchestrator checks against `sv_digest` and computes a `statevector_scalar` or
+    /// `expectation` result from. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sv_state_b64: String,
 }
 
 /// Immutable public inputs to which the proof transcript is cryptographically bound.
@@ -180,6 +185,7 @@ impl StarkProver {
                 sv_digest: Vec::new(),
             },
             stark_proof_b64,
+            sv_state_b64: String::new(),
         })
     }
 
@@ -375,6 +381,7 @@ mod integration_tests {
         let bad = Proof {
             public_inputs: proof.public_inputs.clone(),
             stark_proof_b64: general_purpose::STANDARD.encode(tampered),
+            sv_state_b64: String::new(),
         };
         assert!(!prover.verify_proof(&bad));
     }
