@@ -5,6 +5,11 @@
 //! exports, and that the counts were drawn from that state under the dispatch's seed. The
 //! counts come from the leaf's own integer sampler, not from [`crate::sample`], so every v2
 //! node reports the same counts for a dispatch and v1 and v2 counts differ.
+//!
+//! A mid-circuit circuit (RESET, IF, a gate after a MEASURE) is proved as
+//! `wqc_sv_stark::wire::parse_leaf` rewrites it: unitary gates and terminal measurements on the
+//! register plus ancillas. Its counts follow the same distribution as [`crate::mid_circuit`]'s
+//! shot-by-shot sampler.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -42,10 +47,22 @@ fn internal(m: impl Into<String>) -> Failure {
 /// Whether this core proves v2 leaves (`WQC_SV_STARK_V2`, default on). Off, it reports no
 /// rate, so its node does not advertise them.
 fn enabled() -> bool {
-    !matches!(
-        std::env::var("WQC_SV_STARK_V2").as_deref().map(str::trim),
+    !env_off("WQC_SV_STARK_V2")
+}
+
+fn env_off(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref().map(str::trim),
         Ok("0" | "false" | "off")
     )
+}
+
+/// `/sysinfo`'s `sv_dynamic`: with a v2 rate, this core also proves mid-circuit circuits,
+/// unless `WQC_SV_DYNAMIC` turns that off (mid-circuit leaves carry ancillas and run heavier,
+/// so an operator can withdraw them alone). Without a rate it is absent, so the node sets
+/// neither bit 5 nor bit 6.
+pub fn sv_dynamic(rate: Option<f64>) -> Option<bool> {
+    rate.map(|_| !env_off("WQC_SV_DYNAMIC"))
 }
 
 /// The pool v2 leaves prove on: every core (`WQC_SV_THREADS` to cap it). The global pool is
@@ -81,7 +98,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
     let (lp, counts) = pool()?.install(|| {
         let leaf = leaf::build_sampling(
             checked.level,
-            task.qubit_count,
+            checked.circuit.qubits,
             checked.circuit.gates.clone(),
             checked.sampling.clone(),
         )
@@ -152,7 +169,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
 
 /// A dispatch checked against what a v2 sampling leaf proves.
 struct Checked {
-    circuit: wire::Circuit,
+    circuit: wire::LeafCircuit,
     sampling: Sampling,
     level: SecurityLevel,
     seed: u64,
@@ -189,8 +206,9 @@ impl Checked {
         // way from this JSON (angles round-trip exactly).
         let json = serde_json::to_string(&task.circuit)
             .map_err(|e| bad_request(format!("circuit JSON: {e}")))?;
-        let circuit = wire::parse_circuit(&json).map_err(|e| bad_request(e.to_string()))?;
-        let want = leaf::gate_rows(task.qubit_count, &circuit.gates)
+        let circuit =
+            wire::parse_leaf(&json, task.qubit_count).map_err(|e| bad_request(e.to_string()))?;
+        let want = leaf::gate_rows(circuit.qubits, &circuit.gates)
             .map_err(|e| bad_request(e.to_string()))?;
         if want as u64 != rows {
             return Err(bad_request(format!(
@@ -316,6 +334,12 @@ mod tests {
     }
 
     #[test]
+    fn sv_dynamic_follows_the_rate() {
+        assert_eq!(sv_dynamic(None), None);
+        assert_eq!(sv_dynamic(Some(1e-5)), Some(true));
+    }
+
+    #[test]
     fn counts_match_the_wire_json() {
         let counts = [3, 0, 61, 0];
         let sample = sample_result(&counts, 2);
@@ -400,5 +424,65 @@ mod tests {
         assert!(verifier
             .verify_sampling(proof.as_slice(), &other, digest, 0xDEADBEEF, &counts)
             .is_err());
+    }
+
+    /// A mid-circuit circuit proves as its rewritten circuit, and the orchestrator's verifier,
+    /// built from the same circuit through `parse_leaf`, accepts it.
+    #[test]
+    fn proves_a_mid_circuit_leaf() {
+        use crate::engine::IfParams;
+        let mut t = task(0);
+        t.circuit = vec![
+            Gate::RY(0, 0.9),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 0 }),
+            Gate::IF(IfParams {
+                cbit: 0,
+                value: 1,
+                gate: Box::new(Gate::RY(1, 0.4)),
+            }),
+            Gate::RESET(0),
+            Gate::H(0),
+            Gate::MEASURE(MeasureParams { qubit: 0, cbit: 1 }),
+        ];
+        let json = serde_json::to_string(&t.circuit).expect("json");
+        let c = wire::parse_leaf(&json, 2).expect("circuit");
+        // The RESET of a measured qubit takes an ancilla.
+        assert_eq!(c.qubits, 3);
+        let rows = leaf::gate_rows(c.qubits, &c.gates).expect("rows") as u64;
+        let response = compute(t, rows).expect("v2 leaf");
+        let sample = response.sample_result.expect("counts");
+        assert_eq!(sample.shots, 64);
+
+        let sampling = Sampling {
+            measures: c.measures,
+            cbits: 2,
+            shots: 64,
+        };
+        let verifier = leaf::build_verifier(SecurityLevel::Low, c.qubits, c.gates, Some(sampling))
+            .expect("verifier");
+        let counts = wire::parse_counts(
+            &crate::sample::format_go_sample_result_json(&sample),
+            verifier.sampling().expect("sampling"),
+        )
+        .expect("canonical counts");
+        let proof = general_purpose::STANDARD
+            .decode(&response.proof.stark_proof_b64)
+            .expect("base64");
+        let digest: [u64; 4] = response
+            .proof
+            .public_inputs
+            .sv_digest
+            .clone()
+            .try_into()
+            .expect("4 words");
+        let dispatch = Dispatch {
+            circuit_id: "circuit-fixture",
+            sub_task_id: "sub-fixture",
+            node_id: "node-fixture",
+            slice_id: "0",
+        };
+        verifier
+            .verify_sampling(proof.as_slice(), &dispatch, digest, 0xDEADBEEF, &counts)
+            .expect("the orchestrator's check passes");
     }
 }

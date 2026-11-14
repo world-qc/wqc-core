@@ -187,6 +187,11 @@ pub struct SystemInfo {
     pub sv_bytes_per_row: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sv_base_bytes: Option<u64>,
+    /// With the rate: whether this core also proves mid-circuit circuits (RESET, IF, a gate
+    /// after a MEASURE) as v2 leaves, rewritten by `wqc_sv_stark::wire::parse_leaf`
+    /// (`WQC_SV_DYNAMIC=0` reports false). The node advertises capability bit 6 when true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_dynamic: Option<bool>,
 }
 
 fn validate_task(
@@ -771,6 +776,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         sv_seconds_per_row,
         sv_bytes_per_row: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BYTES_PER_ROW),
         sv_base_bytes: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BASE_BYTES),
+        sv_dynamic: crate::sv_leaf::sv_dynamic(sv_seconds_per_row),
     })
 }
 
