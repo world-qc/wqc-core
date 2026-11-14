@@ -699,7 +699,7 @@ mod tests {
         let json = serde_json::to_string(&t.circuit).expect("json");
         let c = wire::parse_circuit(&json).expect("circuit");
         let rows = leaf::gate_rows(2, &c.gates).expect("rows") as u64;
-        let err = compute(t, rows).err().expect("bad label");
+        let err = compute(t, rows).expect_err("bad label");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("observable short"), "{}", err.1);
     }
