@@ -192,6 +192,11 @@ pub struct SystemInfo {
     /// (`WQC_SV_DYNAMIC=0` reports false). The node advertises capability bit 6 when true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sv_dynamic: Option<bool>,
+    /// With the rate: this core also proves `statevector_scalar` and `expectation` tasks as v2
+    /// unitary leaves and publishes their final state (`sv_state_b64`). The node then
+    /// advertises capability bit 7.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_state_outputs: Option<bool>,
 }
 
 fn validate_task(
@@ -777,6 +782,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         sv_bytes_per_row: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BYTES_PER_ROW),
         sv_base_bytes: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BASE_BYTES),
         sv_dynamic: crate::sv_leaf::sv_dynamic(sv_seconds_per_row),
+        sv_state_outputs: sv_seconds_per_row.map(|_| true),
     })
 }
 
