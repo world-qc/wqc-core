@@ -3603,9 +3603,11 @@ dependencies = [
 name = "wqc-sv-stark"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "libm",
  "p3-air 0.9.0-rc.2",
  "p3-batch-stark",
+ "p3-challenger 0.9.0-rc.2",
  "p3-circuit",
  "p3-circuit-prover",
  "p3-commit 0.9.0-rc.2",
