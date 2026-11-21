@@ -76,6 +76,10 @@ response JSON. A rendered reference is published at
 | `GET` | `/sysinfo` | Host RAM / CPU snapshot + TN backend + PCS memory policy + optional `vram_budget_bytes` (WebGPU) |
 | `GET` | `/health` | Liveness probe polled by `wqc-node` |
 
+A request body over 16 MiB gets `413 Payload Too Large`. That is twice the orchestrator's
+8 MiB submission limit, because a dispatch adds the contraction tree and site order to the
+circuit.
+
 There is no auth layer and CORS is permissive. This API is for `wqc-node` on the same
 host; do not expose it to a network. The default transport is a **Unix domain socket**.
 When `WQC_CONNECTION_MODE=tcp`, the process binds **`0.0.0.0`** (all interfaces) with
