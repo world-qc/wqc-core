@@ -371,6 +371,13 @@ fn compute(mut task: ComputeTask) -> Result<ComputeResponse, (StatusCode, String
     if let Some(rows) = task.sv_leaf_rows.filter(|&r| r > 0) {
         return crate::sv_leaf::compute(task, rows);
     }
+    if task.sv_segment.is_some() {
+        // A tail is only ever a v2 leaf; run as v1 it would answer for another circuit.
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "sv_segment without sv_leaf_rows".to_string(),
+        ));
+    }
 
     let logical_spec_hash = committed_measurement_spec_hash(&task.circuit);
     if task.contraction_tree.is_some() {
@@ -806,6 +813,21 @@ pub async fn get_system_info() -> Json<SystemInfo> {
 #[cfg(test)]
 mod tests {
     use super::committed_measurement_spec_hash;
+
+    /// A tail without `sv_leaf_rows` is refused rather than run as v1 over the whole circuit.
+    #[test]
+    fn sv_segment_needs_sv_leaf_rows() {
+        let task: super::ComputeTask = serde_json::from_value(serde_json::json!({
+            "task_id": "s", "circuit_id": "c", "qubit_count": 2, "original_qubit_count": 2,
+            "slice_id": "1", "slice_assignments": [],
+            "circuit": [{"type": "H", "params": 0}, {"type": "RY", "params": [1, 0.7]}],
+            "sv_segment": {"cuts": [1], "index": 1},
+        }))
+        .expect("task");
+        let (status, msg) = super::compute(task).expect_err("refused");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.contains("sv_leaf_rows"), "{msg}");
+    }
     use crate::engine::{Gate, MeasureParams};
 
     #[test]

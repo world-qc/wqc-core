@@ -389,12 +389,7 @@ fn compute_segment(
         .map_err(|e| bad_request(format!("circuit JSON: {e}")))?;
     let segs = Segments::parse(&json, n, &seg.cuts).map_err(|e| bad_request(e.to_string()))?;
     let k = seg.index;
-    if k + 1 != segs.len() {
-        return Err(bad_request(format!(
-            "segment {k} of {}: only the last segment (the tail) is proved",
-            segs.len()
-        )));
-    }
+    segs.check_tail(k).map_err(|e| bad_request(e.to_string()))?;
     let want = segs.rows(k).map_err(|e| bad_request(e.to_string()))?;
     if want as u64 != rows {
         return Err(bad_request(format!(
