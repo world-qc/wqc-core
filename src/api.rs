@@ -91,6 +91,18 @@ pub struct ComputeTask {
     /// Prove as a v2 (sv-stark) leaf of this many gate rows. Absent proves v1.
     #[serde(default)]
     pub sv_leaf_rows: Option<u64>,
+    /// With `sv_leaf_rows`: this sub-task is one segment of a circuit too deep for one leaf
+    /// (`wqc_sv_stark::segment`). `circuit` is the whole circuit; the leaf proves segment
+    /// `index` of it cut at `cuts`, from the state the earlier segments reach.
+    #[serde(default)]
+    pub sv_segment: Option<SvSegment>,
+}
+
+/// Where a cut circuit is cut and which segment a sub-task proves.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SvSegment {
+    pub cuts: Vec<usize>,
+    pub index: usize,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -197,6 +209,10 @@ pub struct SystemInfo {
     /// advertises capability bit 7.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sv_state_outputs: Option<bool>,
+    /// With the rate: this core proves segments of a circuit too deep for one leaf
+    /// (`sv_segment`). The node then advertises capability bit 8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_segments: Option<bool>,
 }
 
 fn validate_task(
@@ -783,6 +799,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         sv_base_bytes: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BASE_BYTES),
         sv_dynamic: crate::sv_leaf::sv_dynamic(sv_seconds_per_row),
         sv_state_outputs: sv_seconds_per_row.map(|_| true),
+        sv_segments: sv_seconds_per_row.map(|_| true),
     })
 }
 
