@@ -29,6 +29,10 @@ info:
     Errors are **`text/plain`** bodies, except `POST /verify` which returns a
     JSON `VerifyResponse` on `403`.
 
+    A request body over 16 MiB is refused with `413 Payload Too Large`. The
+    orchestrator accepts submissions of at most 8 MiB, and a dispatch adds
+    the contraction tree and site order to the circuit.
+
     Protocol meaning (STARK transcript, public inputs, slice contract) lives
     in [wqc-docs](https://github.com/world-qc/wqc-docs) and
     [`doc/trace-spec.md`](../doc/trace-spec.md). Circuit payload semantics —

@@ -1,7 +1,7 @@
 #![deny(unused_imports)]
 #![allow(dead_code)] // Phase B/C APIs are wired incrementally across modules.
 
-use axum::{routing::post, Json, Router};
+use axum::{extract::DefaultBodyLimit, routing::post, Json, Router};
 use colored::*;
 #[cfg(unix)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -34,6 +34,26 @@ mod sv_leaf;
 mod tn;
 mod trajectory_proof;
 
+/// The largest request body core reads. The orchestrator accepts a submission of at most
+/// 8 MiB (about 100,000 gates of the longest kind) and a dispatch adds the contraction tree
+/// and site order to its circuit, so core takes twice that. axum's default is 2 MiB.
+const MAX_REQUEST_BYTES: usize = 16 << 20;
+
+fn app() -> Router {
+    Router::new()
+        .route("/compute", post(api::handle_compute))
+        .route("/verify", post(api::handle_verify))
+        .route("/leaf_pcs", post(api::handle_leaf_pcs))
+        .route("/gates", axum::routing::get(api::get_supported_gates))
+        .route("/sysinfo", axum::routing::get(api::get_system_info))
+        .route(
+            "/health",
+            axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }),
+        )
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(CorsLayer::permissive())
+}
+
 #[tokio::main]
 async fn main() {
     // Cap Plonky3/rayon nested prove parallelism before the global pool is
@@ -49,17 +69,7 @@ async fn main() {
         .to_lowercase();
 
     // --- 2. Build the Common Axum Routing Pipeline ---
-    let app = Router::new()
-        .route("/compute", post(api::handle_compute))
-        .route("/verify", post(api::handle_verify))
-        .route("/leaf_pcs", post(api::handle_leaf_pcs))
-        .route("/gates", axum::routing::get(api::get_supported_gates))
-        .route("/sysinfo", axum::routing::get(api::get_system_info))
-        .route(
-            "/health",
-            axum::routing::get(|| async { Json(serde_json::json!({ "status": "UP" })) }),
-        )
-        .layer(CorsLayer::permissive());
+    let app = app();
 
     // --- 3. Dynamic Listener Binding based on Configured Mode ---
     #[cfg(not(unix))]
@@ -232,4 +242,41 @@ fn print_core_banner(mode: &str, addr: &str) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+
+    async fn post_compute(bytes: usize) -> StatusCode {
+        // A JSON string of `bytes` in all: read in full, then refused as no compute request.
+        let body = format!("\"{}\"", "a".repeat(bytes - 2));
+        let req = Request::post("/compute")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        tower::Service::call(&mut app(), req)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// A request over axum's 2 MiB default is read up to `MAX_REQUEST_BYTES`.
+    #[tokio::test]
+    async fn reads_requests_up_to_the_limit() {
+        assert_eq!(
+            post_compute(3 << 20).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post_compute(MAX_REQUEST_BYTES).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post_compute(MAX_REQUEST_BYTES + 1).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
 }
