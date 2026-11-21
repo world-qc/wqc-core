@@ -361,14 +361,10 @@ fn unitary_response(
     })
 }
 
-/// Result type of a segment before the last: only its proved digest, which the next
-/// segment's leaf starts from and the root binds.
-pub const SEGMENT_RESULT: &str = "sv_segment";
-
-/// Proves segment `seg.index` of the task's circuit cut at `seg.cuts`. The last segment is the
-/// task's leaf (sampling for `sample_counts`, the final state published for
-/// `statevector_scalar` and `expectation`); an earlier one is a unitary leaf whose result is
-/// its digest alone (`SEGMENT_RESULT`).
+/// Proves the tail of the task's circuit cut at `seg.cuts`: segment `seg.index`, which must be
+/// the last. Its leaf starts from the state the gates before the cut reach, which every
+/// verifier computes, so the head is not proved. The tail is the task's leaf (sampling for
+/// `sample_counts`, the final state published for `statevector_scalar` and `expectation`).
 fn compute_segment(
     task: ComputeTask,
     rows: u64,
@@ -393,16 +389,21 @@ fn compute_segment(
         .map_err(|e| bad_request(format!("circuit JSON: {e}")))?;
     let segs = Segments::parse(&json, n, &seg.cuts).map_err(|e| bad_request(e.to_string()))?;
     let k = seg.index;
+    if k + 1 != segs.len() {
+        return Err(bad_request(format!(
+            "segment {k} of {}: only the last segment (the tail) is proved",
+            segs.len()
+        )));
+    }
     let want = segs.rows(k).map_err(|e| bad_request(e.to_string()))?;
     if want as u64 != rows {
         return Err(bad_request(format!(
             "sv_leaf_rows {rows}, but segment {k} has {want} gate rows"
         )));
     }
-    let last = k + 1 == segs.len();
     let gate_count = segs.segments[k].len();
     let start = Instant::now();
-    if last && task.output_mode == OutputMode::SampleCounts {
+    if task.output_mode == OutputMode::SampleCounts {
         let (Some(cbits), Some(shots), Some(seed)) =
             (task.classical_bit_count, task.shots, task.sample_seed)
         else {
@@ -429,11 +430,7 @@ fn compute_segment(
             prove_wall_ms,
         ));
     }
-    let observables = if last {
-        observables_of(&task, n)?
-    } else {
-        Vec::new()
-    };
+    let observables = observables_of(&task, n)?;
     let (lp, fin) = pool()?.install(|| {
         let leaf = segs
             .leaf(level, k, 0, 0)
@@ -447,69 +444,15 @@ fn compute_segment(
         Ok::<_, Failure>((lp, fin))
     })?;
     let prove_wall_ms = start.elapsed().as_millis() as u64;
-    if last {
-        return unitary_response(
-            task,
-            rows,
-            &lp,
-            &fin,
-            &observables,
-            gate_count,
-            prove_wall_ms,
-        );
-    }
-    let sv_digest = proved_digest(&lp);
-    if sv_digest != wqc_sv_stark::digest::terminal_digest(&fin) {
-        return Err(internal(
-            "v2 segment: the proved digest is not the executed state's",
-        ));
-    }
-    let complex_result = ComplexResult {
-        real: 0.0,
-        imag: 0.0,
-    };
-    let proof_bytes = leaf::encode_proof(&lp.proof);
-    println!(
-        "v2 segment {k} proved for task {}: {} rows, {} ms, {} proof bytes",
-        task.task_id,
+    unitary_response(
+        task,
         rows,
+        &lp,
+        &fin,
+        &observables,
+        gate_count,
         prove_wall_ms,
-        proof_bytes.len()
-    );
-    let proof = Proof {
-        public_inputs: PublicInputs {
-            circuit_id: task.circuit_id.clone(),
-            sub_task_id: task.task_id.clone(),
-            node_id: task.node_id.clone(),
-            slice_id: task.slice_id.clone(),
-            output_result_hash: calculate_complex_result_hash(&complex_result),
-            measurement_spec_hash: String::new(),
-            security_level: task.security_level.clone(),
-            sv_digest,
-        },
-        stark_proof_b64: general_purpose::STANDARD.encode(&proof_bytes),
-        sv_state_b64: String::new(),
-    };
-    Ok(ComputeResponse {
-        task_id: task.task_id,
-        status: "success".to_string(),
-        result_type: SEGMENT_RESULT.to_string(),
-        complex_result,
-        sample_result: None,
-        expectation_result: None,
-        work_report: WorkReport {
-            trace_rows: rows,
-            gate_count: gate_count as u32,
-            compute_wall_ms: 0,
-            prove_wall_ms,
-            proof_bytes: proof.stark_proof_b64.len() as u64,
-            tn_backend: String::new(),
-            vram_peak_bytes: 0,
-            proof_scope: PROOF_SCOPE.to_string(),
-        },
-        proof,
-        distribution_proof: None,
-    })
+    )
 }
 
 /// A `statevector_scalar` or `expectation` dispatch checked against what a v2 unitary leaf
@@ -975,16 +918,16 @@ mod tests {
             .expect("the orchestrator's check passes");
     }
 
-    /// A circuit cut into two segments: the first proves its digest alone, the last samples
-    /// from the state the first reaches, and each verifies with the verifier the orchestrator
-    /// builds from the whole circuit and the cuts.
+    /// A circuit cut in two: only the tail is proved, sampling from the state the head
+    /// reaches, and it verifies with the verifier the orchestrator builds from the whole
+    /// circuit and the cut.
     #[test]
-    fn proves_the_segments_of_a_cut_circuit() {
+    fn proves_the_tail_of_a_cut_circuit() {
         use wqc_sv_stark::segment::Segments;
         let seg_task = |index: usize, rows: u64| {
             let mut t = task(rows);
-            t.task_id = format!("sub-seg-{index}");
-            t.slice_id = index.to_string();
+            t.task_id = "sub-seg-1".to_string();
+            t.slice_id = "1".to_string();
             t.sv_segment = Some(crate::api::SvSegment {
                 cuts: vec![2],
                 index,
@@ -995,65 +938,44 @@ mod tests {
         let segs = Segments::parse(&json, 2, &[2]).expect("segments");
         let (rows0, rows1) = (segs.rows(0).unwrap() as u64, segs.rows(1).unwrap() as u64);
         assert!(
-            compute(seg_task(0, rows0 + 1), rows0 + 1).is_err(),
+            compute(seg_task(0, rows0), rows0).is_err(),
+            "the head is not proved"
+        );
+        assert!(
+            compute(seg_task(1, rows1 + 1), rows1 + 1).is_err(),
             "rows must match"
         );
 
-        let first = compute(seg_task(0, rows0), rows0).expect("segment 0");
-        assert_eq!(first.result_type, SEGMENT_RESULT);
-        assert!(first.sample_result.is_none());
-        let last = compute(seg_task(1, rows1), rows1).expect("segment 1");
-        assert_eq!(last.result_type, "sample_counts");
-        let sample = last.sample_result.clone().expect("counts");
+        let tail = compute(seg_task(1, rows1), rows1).expect("tail");
+        assert_eq!(tail.result_type, "sample_counts");
+        let sample = tail.sample_result.clone().expect("counts");
         assert_eq!(sample.shots, 64);
 
-        let dispatch = |t: &ComputeTask| Dispatch {
+        let dispatch = Dispatch {
             circuit_id: "circuit-fixture",
-            sub_task_id: if t.slice_id == "0" {
-                "sub-seg-0"
-            } else {
-                "sub-seg-1"
-            },
+            sub_task_id: "sub-seg-1",
             node_id: "node-fixture",
-            slice_id: if t.slice_id == "0" { "0" } else { "1" },
+            slice_id: "1",
         };
-        let decode = |r: &ComputeResponse| {
-            general_purpose::STANDARD
-                .decode(&r.proof.stark_proof_b64)
-                .expect("base64")
-        };
-        let digest = |r: &ComputeResponse| -> [u64; 4] {
-            r.proof
-                .public_inputs
-                .sv_digest
-                .clone()
-                .try_into()
-                .expect("4 words")
-        };
-        let v0 = segs
-            .verifier(SecurityLevel::Low, 0, 2, 0)
-            .expect("verifier 0");
-        v0.verify_dispatch(
-            decode(&first).as_slice(),
-            &dispatch(&seg_task(0, 0)),
-            digest(&first),
-        )
-        .expect("segment 0 verifies");
-        let v1 = segs
+        let proof = general_purpose::STANDARD
+            .decode(&tail.proof.stark_proof_b64)
+            .expect("base64");
+        let digest: [u64; 4] = tail
+            .proof
+            .public_inputs
+            .sv_digest
+            .clone()
+            .try_into()
+            .expect("4 words");
+        let v = segs
             .verifier(SecurityLevel::Low, 1, 2, 64)
-            .expect("verifier 1");
+            .expect("verifier");
         let counts = wire::parse_counts(
             &crate::sample::format_go_sample_result_json(&sample),
-            v1.sampling().expect("sampling"),
+            v.sampling().expect("sampling"),
         )
         .expect("canonical counts");
-        v1.verify_sampling(
-            decode(&last).as_slice(),
-            &dispatch(&seg_task(1, 0)),
-            digest(&last),
-            0xDEADBEEF,
-            &counts,
-        )
-        .expect("segment 1 verifies");
+        v.verify_sampling(proof.as_slice(), &dispatch, digest, 0xDEADBEEF, &counts)
+            .expect("the tail verifies");
     }
 }

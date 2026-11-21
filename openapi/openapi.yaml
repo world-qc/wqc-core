@@ -616,14 +616,13 @@ components:
           nullable: true
           required: [cuts, index]
           description: |
-            With `sv_leaf_rows`: the sub-task is segment `index` of `circuit`
+            With `sv_leaf_rows`: the sub-task proves the tail of `circuit`
             (the whole terminal circuit) cut at `cuts` (indices into its
-            unitary gates, `wqc_sv_stark::segment`), and `sv_leaf_rows` is that
-            segment's gate rows. The leaf starts from the state the earlier
-            segments reach, which core computes. The last segment answers as
-            any v2 leaf of the task's mode; an earlier one answers with
-            `result_type` `sv_segment`, a zero `complex_result` and only its
-            `public_inputs.sv_digest`.
+            unitary gates, `wqc_sv_stark::segment`). `index` must be the last
+            segment, and `sv_leaf_rows` is its gate rows. The leaf starts from
+            the state the gates before the last cut reach, which core and
+            every verifier compute; it answers as any v2 leaf of the task's
+            mode.
           properties:
             cuts:
               type: array
@@ -797,11 +796,7 @@ components:
           type: string
           enum: [success]
         result_type:
-          description: The dispatched `OutputMode`, or `sv_segment` for a segment before the last (`sv_segment`).
-          oneOf:
-            - $ref: "#/components/schemas/OutputMode"
-            - type: string
-              enum: [sv_segment]
+          $ref: "#/components/schemas/OutputMode"
         complex_result:
           $ref: "#/components/schemas/ComplexResult"
         sample_result:
@@ -925,4 +920,4 @@ components:
           description: With the v2 rate, this core also proves `statevector_scalar` and `expectation` as v2 leaves and publishes their final state; the node advertises capability bit 7
         sv_segments:
           type: boolean
-          description: With the v2 rate, this core proves segments of a circuit too deep for one leaf (`sv_segment`); the node advertises capability bit 8
+          description: With the v2 rate, this core proves the tail of a circuit too deep for one leaf (`sv_segment`); the node advertises capability bit 8
