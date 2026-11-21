@@ -96,6 +96,9 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
     if !enabled() {
         return Err(bad_request("this core does not prove v2 leaves"));
     }
+    if let Some(seg) = task.sv_segment.clone() {
+        return compute_segment(task, rows, &seg);
+    }
     if task.output_mode != OutputMode::SampleCounts {
         return compute_unitary(task, rows);
     }
@@ -121,12 +124,37 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
             .map_err(|e| internal(format!("v2 leaf: {e}")))
     })?;
     let prove_wall_ms = start.elapsed().as_millis() as u64;
+    Ok(sampling_response(
+        task,
+        rows,
+        &lp,
+        &counts,
+        checked.sampling.cbits,
+        checked.circuit.gates.len(),
+        prove_wall_ms,
+    ))
+}
 
-    let sv_digest: Vec<u64> = lp.statement[4..leaf::STATEMENT_LEN]
+/// The digest a leaf proof's statement exports.
+fn proved_digest(lp: &leaf::LeafProof) -> Vec<u64> {
+    lp.statement[4..leaf::STATEMENT_LEN]
         .iter()
         .map(p3_field_sv::PrimeField64::as_canonical_u64)
-        .collect();
-    let sample = sample_result(&counts, checked.sampling.cbits);
+        .collect()
+}
+
+/// The response for a proved sampling leaf: its counts, digest and proof.
+fn sampling_response(
+    task: ComputeTask,
+    rows: u64,
+    lp: &leaf::LeafProof,
+    counts: &[u64],
+    cbits: usize,
+    gate_count: usize,
+    prove_wall_ms: u64,
+) -> ComputeResponse {
+    let sv_digest = proved_digest(lp);
+    let sample = sample_result(counts, cbits);
     let proof_bytes = leaf::encode_proof(&lp.proof);
     let proof = Proof {
         public_inputs: PublicInputs {
@@ -149,7 +177,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
         prove_wall_ms,
         proof_bytes.len()
     );
-    Ok(ComputeResponse {
+    ComputeResponse {
         task_id: task.task_id,
         status: "success".to_string(),
         result_type: "sample_counts".to_string(),
@@ -161,7 +189,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
         expectation_result: None,
         work_report: WorkReport {
             trace_rows: rows,
-            gate_count: checked.circuit.gates.len() as u32,
+            gate_count: gate_count as u32,
             compute_wall_ms: 0,
             prove_wall_ms,
             proof_bytes: proof.stark_proof_b64.len() as u64,
@@ -171,7 +199,7 @@ pub fn compute(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Failure>
         },
         proof,
         distribution_proof: None,
-    })
+    }
 }
 
 /// Proves a `statevector_scalar` or `expectation` task as a v2 unitary leaf. The leaf binds
@@ -182,6 +210,48 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
     let (level, circuit) = check_unitary(&task, rows)?;
     let n = task.qubit_count;
     // Observables are checked before proving, so a bad label costs no proof.
+    let observables = observables_of(&task, n)?;
+    let start = Instant::now();
+    let (lp, fin) = pool()?.install(|| {
+        let leaf = leaf::build(level, n, circuit.gates.clone())
+            .map_err(|e| bad_request(format!("v2 leaf: {e}")))?;
+        crate::cancel::check().map_err(|e| internal(e.to_string()))?;
+        let lp = leaf
+            .prove(context(&task))
+            .map_err(|e| internal(format!("v2 leaf: {e}")))?;
+        // The leaf does not hand back its final state, so the same fused gates run once
+        // more (cheap next to the proof); the digest check below ties the two together.
+        let fin = wqc_sv_stark::exec::execute(n, &circuit.gates).1;
+        Ok::<_, Failure>((lp, fin))
+    })?;
+    let prove_wall_ms = start.elapsed().as_millis() as u64;
+    unitary_response(
+        task,
+        rows,
+        &lp,
+        &fin,
+        &observables,
+        circuit.gates.len(),
+        prove_wall_ms,
+    )
+}
+
+/// The dispatch context the leaf proof binds.
+fn context(task: &ComputeTask) -> [u64; 4] {
+    Dispatch {
+        circuit_id: &task.circuit_id,
+        sub_task_id: &task.task_id,
+        node_id: &task.node_id,
+        slice_id: &task.slice_id,
+    }
+    .context()
+}
+
+/// An `expectation` task's observables, checked; none for other modes.
+fn observables_of(
+    task: &ComputeTask,
+    n: usize,
+) -> Result<Vec<(String, Vec<outputs::PauliTerm>)>, Failure> {
     let observables: Vec<(String, Vec<outputs::PauliTerm>)> =
         if task.output_mode == OutputMode::Expectation {
             task.observables
@@ -206,43 +276,33 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
         } else {
             Vec::new()
         };
-    let start = Instant::now();
-    let (lp, fin) = pool()?.install(|| {
-        let leaf = leaf::build(level, n, circuit.gates.clone())
-            .map_err(|e| bad_request(format!("v2 leaf: {e}")))?;
-        crate::cancel::check().map_err(|e| internal(e.to_string()))?;
-        let ctx = Dispatch {
-            circuit_id: &task.circuit_id,
-            sub_task_id: &task.task_id,
-            node_id: &task.node_id,
-            slice_id: &task.slice_id,
-        }
-        .context();
-        let lp = leaf
-            .prove(ctx)
-            .map_err(|e| internal(format!("v2 leaf: {e}")))?;
-        // The leaf does not hand back its final state, so the same fused gates run once
-        // more (cheap next to the proof); the digest check below ties the two together.
-        let fin = wqc_sv_stark::exec::execute(n, &circuit.gates).1;
-        Ok::<_, Failure>((lp, fin))
-    })?;
-    let prove_wall_ms = start.elapsed().as_millis() as u64;
+    Ok(observables)
+}
 
-    let sv_digest: Vec<u64> = lp.statement[4..leaf::STATEMENT_LEN]
-        .iter()
-        .map(p3_field_sv::PrimeField64::as_canonical_u64)
-        .collect();
-    if sv_digest != wqc_sv_stark::digest::terminal_digest(&fin) {
+/// The response for a proved unitary leaf with the final state `fin` it was proved for: the
+/// `|0…0⟩` amplitude or the observables' values, and the state published.
+fn unitary_response(
+    task: ComputeTask,
+    rows: u64,
+    lp: &leaf::LeafProof,
+    fin: &[wqc_sv_stark::exec::C],
+    observables: &[(String, Vec<outputs::PauliTerm>)],
+    gate_count: usize,
+    prove_wall_ms: u64,
+) -> Result<ComputeResponse, Failure> {
+    let n = task.qubit_count;
+    let sv_digest = proved_digest(lp);
+    if sv_digest != wqc_sv_stark::digest::terminal_digest(fin) {
         return Err(internal(
             "v2 leaf: the proved digest is not the executed state's",
         ));
     }
-    let (real, imag) = outputs::amplitude_zero(&fin);
+    let (real, imag) = outputs::amplitude_zero(fin);
     let complex_result = ComplexResult { real, imag };
     let expectation_result = if task.output_mode == OutputMode::Expectation {
         let mut values = std::collections::BTreeMap::new();
-        for (id, terms) in &observables {
-            let (real, imag) = outputs::observable(&fin, n, terms)
+        for (id, terms) in observables {
+            let (real, imag) = outputs::observable(fin, n, terms)
                 .map_err(|e| bad_request(format!("observable {id}: {e}")))?;
             values.insert(id.clone(), ComplexResult { real, imag });
         }
@@ -270,7 +330,7 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
             sv_digest,
         },
         stark_proof_b64: general_purpose::STANDARD.encode(&proof_bytes),
-        sv_state_b64: general_purpose::STANDARD.encode(outputs::encode_state(&fin)),
+        sv_state_b64: general_purpose::STANDARD.encode(outputs::encode_state(fin)),
     };
     println!(
         "v2 unitary leaf proved for task {}: {} rows, {} ms, {} proof bytes",
@@ -288,7 +348,7 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
         expectation_result,
         work_report: WorkReport {
             trace_rows: rows,
-            gate_count: circuit.gates.len() as u32,
+            gate_count: gate_count as u32,
             compute_wall_ms: 0,
             prove_wall_ms,
             proof_bytes: proof.stark_proof_b64.len() as u64,
@@ -299,6 +359,95 @@ fn compute_unitary(task: ComputeTask, rows: u64) -> Result<ComputeResponse, Fail
         proof,
         distribution_proof: None,
     })
+}
+
+/// Proves the tail of the task's circuit cut at `seg.cuts`: segment `seg.index`, which must be
+/// the last. Its leaf starts from the state the gates before the cut reach, which every
+/// verifier computes, so the head is not proved. The tail is the task's leaf (sampling for
+/// `sample_counts`, the final state published for `statevector_scalar` and `expectation`).
+fn compute_segment(
+    task: ComputeTask,
+    rows: u64,
+    seg: &crate::api::SvSegment,
+) -> Result<ComputeResponse, Failure> {
+    use wqc_sv_stark::segment::Segments;
+    if !task.slice_assignments.is_empty()
+        || task.contraction_tree.is_some()
+        || task.mps_time_split.is_some()
+    {
+        return Err(bad_request(
+            "a v2 segment is an unsliced sub-task without a tree or time split",
+        ));
+    }
+    if task.noise_model.is_some() {
+        return Err(bad_request("a v2 segment has no noise model"));
+    }
+    let level = SecurityLevel::parse(&task.security_level)
+        .ok_or_else(|| bad_request(format!("unknown security level {:?}", task.security_level)))?;
+    let n = task.qubit_count;
+    let json = serde_json::to_string(&task.circuit)
+        .map_err(|e| bad_request(format!("circuit JSON: {e}")))?;
+    let segs = Segments::parse(&json, n, &seg.cuts).map_err(|e| bad_request(e.to_string()))?;
+    let k = seg.index;
+    segs.check_tail(k).map_err(|e| bad_request(e.to_string()))?;
+    let want = segs.rows(k).map_err(|e| bad_request(e.to_string()))?;
+    if want as u64 != rows {
+        return Err(bad_request(format!(
+            "sv_leaf_rows {rows}, but segment {k} has {want} gate rows"
+        )));
+    }
+    let gate_count = segs.segments[k].len();
+    let start = Instant::now();
+    if task.output_mode == OutputMode::SampleCounts {
+        let (Some(cbits), Some(shots), Some(seed)) =
+            (task.classical_bit_count, task.shots, task.sample_seed)
+        else {
+            return Err(bad_request(
+                "a v2 leaf needs classical_bit_count, shots and sample_seed",
+            ));
+        };
+        let (lp, counts) = pool()?.install(|| {
+            let leaf = segs
+                .leaf(level, k, cbits as u32, shots)
+                .map_err(|e| bad_request(format!("v2 segment: {e}")))?;
+            crate::cancel::check().map_err(|e| internal(e.to_string()))?;
+            leaf.prove_sampling(context(&task), seed)
+                .map_err(|e| internal(format!("v2 segment: {e}")))
+        })?;
+        let prove_wall_ms = start.elapsed().as_millis() as u64;
+        return Ok(sampling_response(
+            task,
+            rows,
+            &lp,
+            &counts,
+            cbits,
+            gate_count,
+            prove_wall_ms,
+        ));
+    }
+    let observables = observables_of(&task, n)?;
+    let (lp, fin) = pool()?.install(|| {
+        let leaf = segs
+            .leaf(level, k, 0, 0)
+            .map_err(|e| bad_request(format!("v2 segment: {e}")))?;
+        crate::cancel::check().map_err(|e| internal(e.to_string()))?;
+        let lp = leaf
+            .prove(context(&task))
+            .map_err(|e| internal(format!("v2 segment: {e}")))?;
+        let from = segs.start(k).map_err(|e| internal(e.to_string()))?;
+        let fin = wqc_sv_stark::exec::execute_from(n, &segs.segments[k], Some(&from)).1;
+        Ok::<_, Failure>((lp, fin))
+    })?;
+    let prove_wall_ms = start.elapsed().as_millis() as u64;
+    unitary_response(
+        task,
+        rows,
+        &lp,
+        &fin,
+        &observables,
+        gate_count,
+        prove_wall_ms,
+    )
 }
 
 /// A `statevector_scalar` or `expectation` dispatch checked against what a v2 unitary leaf
@@ -762,5 +911,66 @@ mod tests {
         verifier
             .verify_sampling(proof.as_slice(), &dispatch, digest, 0xDEADBEEF, &counts)
             .expect("the orchestrator's check passes");
+    }
+
+    /// A circuit cut in two: only the tail is proved, sampling from the state the head
+    /// reaches, and it verifies with the verifier the orchestrator builds from the whole
+    /// circuit and the cut.
+    #[test]
+    fn proves_the_tail_of_a_cut_circuit() {
+        use wqc_sv_stark::segment::Segments;
+        let seg_task = |index: usize, rows: u64| {
+            let mut t = task(rows);
+            t.task_id = "sub-seg-1".to_string();
+            t.slice_id = "1".to_string();
+            t.sv_segment = Some(crate::api::SvSegment {
+                cuts: vec![2],
+                index,
+            });
+            t
+        };
+        let json = serde_json::to_string(&task(4).circuit).expect("json");
+        let segs = Segments::parse(&json, 2, &[2]).expect("segments");
+        let (rows0, rows1) = (segs.rows(0).unwrap() as u64, segs.rows(1).unwrap() as u64);
+        assert!(
+            compute(seg_task(0, rows0), rows0).is_err(),
+            "the head is not proved"
+        );
+        assert!(
+            compute(seg_task(1, rows1 + 1), rows1 + 1).is_err(),
+            "rows must match"
+        );
+
+        let tail = compute(seg_task(1, rows1), rows1).expect("tail");
+        assert_eq!(tail.result_type, "sample_counts");
+        let sample = tail.sample_result.clone().expect("counts");
+        assert_eq!(sample.shots, 64);
+
+        let dispatch = Dispatch {
+            circuit_id: "circuit-fixture",
+            sub_task_id: "sub-seg-1",
+            node_id: "node-fixture",
+            slice_id: "1",
+        };
+        let proof = general_purpose::STANDARD
+            .decode(&tail.proof.stark_proof_b64)
+            .expect("base64");
+        let digest: [u64; 4] = tail
+            .proof
+            .public_inputs
+            .sv_digest
+            .clone()
+            .try_into()
+            .expect("4 words");
+        let v = segs
+            .verifier(SecurityLevel::Low, 1, 2, 64)
+            .expect("verifier");
+        let counts = wire::parse_counts(
+            &crate::sample::format_go_sample_result_json(&sample),
+            v.sampling().expect("sampling"),
+        )
+        .expect("canonical counts");
+        v.verify_sampling(proof.as_slice(), &dispatch, digest, 0xDEADBEEF, &counts)
+            .expect("the tail verifies");
     }
 }

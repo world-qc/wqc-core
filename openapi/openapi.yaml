@@ -611,6 +611,27 @@ components:
             response carries `public_inputs.sv_digest`, a v2 proof in
             `stark_proof_b64`, `proof_scope` `sv_stark_v2`, and no
             `distribution_proof`. Absent proves v1.
+        sv_segment:
+          type: object
+          nullable: true
+          required: [cuts, index]
+          description: |
+            With `sv_leaf_rows`: the sub-task proves the tail of `circuit`
+            (the whole terminal circuit) cut at `cuts` (indices into its
+            unitary gates, `wqc_sv_stark::segment`). `index` must be the last
+            segment, and `sv_leaf_rows` is its gate rows. The leaf starts from
+            the state the gates before the last cut reach, which core and
+            every verifier compute; it answers as any v2 leaf of the task's
+            mode.
+          properties:
+            cuts:
+              type: array
+              items:
+                type: integer
+                minimum: 1
+            index:
+              type: integer
+              minimum: 0
 
     SampleResult:
       type: object
@@ -897,3 +918,6 @@ components:
         sv_state_outputs:
           type: boolean
           description: With the v2 rate, this core also proves `statevector_scalar` and `expectation` as v2 leaves and publishes their final state; the node advertises capability bit 7
+        sv_segments:
+          type: boolean
+          description: With the v2 rate, this core proves the tail of a circuit too deep for one leaf (`sv_segment`); the node advertises capability bit 8

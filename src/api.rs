@@ -91,6 +91,18 @@ pub struct ComputeTask {
     /// Prove as a v2 (sv-stark) leaf of this many gate rows. Absent proves v1.
     #[serde(default)]
     pub sv_leaf_rows: Option<u64>,
+    /// With `sv_leaf_rows`: this sub-task proves the tail of a circuit too deep for one leaf
+    /// (`wqc_sv_stark::segment`). `circuit` is the whole circuit; the leaf proves its last
+    /// segment `index` when cut at `cuts`, from the state the gates before it reach.
+    #[serde(default)]
+    pub sv_segment: Option<SvSegment>,
+}
+
+/// Where a cut circuit is cut and which segment (the last) a sub-task proves.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SvSegment {
+    pub cuts: Vec<usize>,
+    pub index: usize,
 }
 
 /// Successful compute response: scalar and/or sample histogram plus STARK proof.
@@ -197,6 +209,10 @@ pub struct SystemInfo {
     /// advertises capability bit 7.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sv_state_outputs: Option<bool>,
+    /// With the rate: this core proves the tail of a circuit too deep for one leaf
+    /// (`sv_segment`). The node then advertises capability bit 8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_segments: Option<bool>,
 }
 
 fn validate_task(
@@ -354,6 +370,13 @@ fn compute(mut task: ComputeTask) -> Result<ComputeResponse, (StatusCode, String
 
     if let Some(rows) = task.sv_leaf_rows.filter(|&r| r > 0) {
         return crate::sv_leaf::compute(task, rows);
+    }
+    if task.sv_segment.is_some() {
+        // A tail is only ever a v2 leaf; run as v1 it would answer for another circuit.
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "sv_segment without sv_leaf_rows".to_string(),
+        ));
     }
 
     let logical_spec_hash = committed_measurement_spec_hash(&task.circuit);
@@ -783,12 +806,28 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         sv_base_bytes: sv_seconds_per_row.map(|_| crate::sv_leaf::SV_BASE_BYTES),
         sv_dynamic: crate::sv_leaf::sv_dynamic(sv_seconds_per_row),
         sv_state_outputs: sv_seconds_per_row.map(|_| true),
+        sv_segments: sv_seconds_per_row.map(|_| true),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::committed_measurement_spec_hash;
+
+    /// A tail without `sv_leaf_rows` is refused rather than run as v1 over the whole circuit.
+    #[test]
+    fn sv_segment_needs_sv_leaf_rows() {
+        let task: super::ComputeTask = serde_json::from_value(serde_json::json!({
+            "task_id": "s", "circuit_id": "c", "qubit_count": 2, "original_qubit_count": 2,
+            "slice_id": "1", "slice_assignments": [],
+            "circuit": [{"type": "H", "params": 0}, {"type": "RY", "params": [1, 0.7]}],
+            "sv_segment": {"cuts": [1], "index": 1},
+        }))
+        .expect("task");
+        let (status, msg) = super::compute(task).expect_err("refused");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.contains("sv_leaf_rows"), "{msg}");
+    }
     use crate::engine::{Gate, MeasureParams};
 
     #[test]
