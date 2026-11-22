@@ -925,3 +925,7 @@ components:
         sv_segments:
           type: boolean
           description: With the v2 rate, this core proves the tail of a circuit too deep for one leaf (`sv_segment`); the node advertises capability bit 8
+        sv_max_qubits:
+          type: integer
+          format: int32
+          description: With the v2 rate, the most qubits (ancillas included) a v2 leaf of this core may have; above 16 the node budgets a leaf's basis states too (`effective_rows`), and it advertises capability bit 9 when this is 20 or more
