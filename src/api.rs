@@ -213,6 +213,12 @@ pub struct SystemInfo {
     /// (`sv_segment`). The node then advertises capability bit 8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sv_segments: Option<bool>,
+    /// With the rate: the most qubits a v2 leaf of this core may have, with ancillas
+    /// (`wqc_sv_stark::MAX_QUBITS`). Above 16 a leaf's basis states weigh in its memory, which
+    /// the node budgets with `wqc_sv_stark::leaf::effective_rows`; the node advertises
+    /// capability bit 9 when this is 20 or more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sv_max_qubits: Option<u32>,
 }
 
 fn validate_task(
@@ -807,6 +813,7 @@ pub async fn get_system_info() -> Json<SystemInfo> {
         sv_dynamic: crate::sv_leaf::sv_dynamic(sv_seconds_per_row),
         sv_state_outputs: sv_seconds_per_row.map(|_| true),
         sv_segments: sv_seconds_per_row.map(|_| true),
+        sv_max_qubits: sv_seconds_per_row.map(|_| wqc_sv_stark::MAX_QUBITS as u32),
     })
 }
 
