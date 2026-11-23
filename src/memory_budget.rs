@@ -24,6 +24,7 @@ pub fn host_memory_reserve_gib(total_gib: u64) -> u64 {
 
 /// Maximum WQC memory budget (bytes) from total physical RAM (bytes).
 /// Subtracts the reserve from the exact total, so the fraction of a GiB is kept.
+/// Matches wqc-node (same test vectors there).
 pub fn max_wqc_memory_bytes_from_total(total_bytes: u64) -> u64 {
     let reserve = host_memory_reserve_gib(total_bytes / GIB).saturating_mul(GIB);
     total_bytes.saturating_sub(reserve).max(GIB)
