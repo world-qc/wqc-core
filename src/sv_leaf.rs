@@ -560,10 +560,12 @@ fn sample_result(counts: &[u64], cbits: usize) -> SampleResult {
     }
 }
 
-/// Seconds a v2 leaf takes per gate row on this machine, measured once per process by
-/// proving a small sampling leaf (n = 12, 8 rounding steps, 1024 shots). Fixed costs of the
-/// small leaf count as per-row time, so it errs slow. `None` when v2 is off or the
-/// measurement failed.
+/// Seconds a v2 leaf takes per gate row on this machine, measured once per process as the
+/// slope between two sampling leaves on n = 12 (one and four layers of rounding steps, 1024
+/// shots). A leaf has fixed costs that do not grow with its gate rows (the 2^16-row range
+/// table among them); on one small leaf they counted as per-row time and made the rate two
+/// to four times too slow. The fixed part is left to the base of the leaf's timeout. `None`
+/// when v2 is off or the measurement failed.
 pub fn seconds_per_row() -> Option<f64> {
     static RATE: OnceLock<Option<f64>> = OnceLock::new();
     *RATE.get_or_init(|| {
@@ -575,10 +577,49 @@ pub fn seconds_per_row() -> Option<f64> {
 }
 
 fn measure() -> Result<f64, String> {
+    // The first proof pays one-time costs (pool start, allocator growth). Counted in the
+    // small leaf, they would make the slope too shallow and the node advertise too much.
+    prove_rate_leaf(1)?;
+    let (small_rows, small_secs) = prove_rate_leaf(1)?;
+    let (large_rows, large_secs) = prove_rate_leaf(4)?;
+    rate_from(small_rows, small_secs, large_rows, large_secs)
+}
+
+/// The slope of two timings, or the larger leaf's mean time per row when noise puts the
+/// slope at or under zero (the mean errs slow, as the one-leaf rate did).
+fn rate_from(
+    small_rows: usize,
+    small_secs: f64,
+    large_rows: usize,
+    large_secs: f64,
+) -> Result<f64, String> {
+    if large_rows <= small_rows {
+        return Err(format!("rate leaves of {small_rows} and {large_rows} rows"));
+    }
+    let mean = large_secs / large_rows as f64;
+    let slope = (large_secs - small_secs) / (large_rows - small_rows) as f64;
+    let rate = if slope.is_finite() && slope > 0.0 {
+        slope.min(mean)
+    } else {
+        mean
+    };
+    (rate.is_finite() && rate > 0.0)
+        .then_some(rate)
+        .ok_or_else(|| format!("rate {rate}"))
+}
+
+/// Proves a sampling leaf of `layers` layers of RY on wires 0 to 7 of 12, CNOTs between
+/// layers so they do not fuse (8 rounding steps a layer), and returns its gate rows and the
+/// seconds the proof took.
+fn prove_rate_leaf(layers: usize) -> Result<(usize, f64), String> {
     const N: usize = 12;
-    let mut circuit: Vec<crate::engine::Gate> = (0..8)
-        .map(|q| crate::engine::Gate::RY(q, 0.3 + 0.1 * q as f64))
-        .collect();
+    let mut circuit: Vec<crate::engine::Gate> = Vec::new();
+    for layer in 0..layers {
+        if layer > 0 {
+            circuit.extend((0..7).map(|q| crate::engine::Gate::CNOT(q, q + 1)));
+        }
+        circuit.extend((0..8).map(|q| crate::engine::Gate::RY(q, 0.3 + 0.1 * (q + layer) as f64)));
+    }
     circuit.extend(
         (0..4).map(|q| {
             crate::engine::Gate::MEASURE(crate::engine::MeasureParams { qubit: q, cbit: q })
@@ -606,10 +647,7 @@ fn measure() -> Result<f64, String> {
         .context();
         leaf.prove_sampling(ctx, 1).map_err(|e| e.to_string())
     })?;
-    let rate = start.elapsed().as_secs_f64() / rows as f64;
-    (rate.is_finite() && rate > 0.0)
-        .then_some(rate)
-        .ok_or_else(|| format!("rate {rate}"))
+    Ok((rows, start.elapsed().as_secs_f64()))
 }
 
 #[cfg(test)]
@@ -648,6 +686,28 @@ mod tests {
     fn measures_a_rate() {
         let rate = seconds_per_row().expect("rate");
         assert!(rate > 0.0 && rate < 1.0, "{rate}");
+    }
+
+    #[test]
+    fn rate_is_the_slope_without_fixed_costs() {
+        // 2 s fixed plus 10 µs a row: the slope finds 10 µs, the mean of either leaf more.
+        let rate = rate_from(16_384, 2.0 + 0.16384, 65_536, 2.0 + 0.65536).unwrap();
+        assert!((rate - 10e-6).abs() < 1e-12, "{rate}");
+    }
+
+    #[test]
+    fn noisy_slope_falls_back_to_the_mean() {
+        let rate = rate_from(16_384, 3.0, 65_536, 2.0).unwrap();
+        assert!((rate - 2.0 / 65_536.0).abs() < 1e-15, "{rate}");
+        assert!(rate_from(65_536, 1.0, 16_384, 2.0).is_err());
+    }
+
+    #[test]
+    fn rate_leaves_grow_by_rounding_layers() {
+        let (small, _) = prove_rate_leaf(1).unwrap();
+        let (large, _) = prove_rate_leaf(4).unwrap();
+        assert_eq!(small, 8 << 11);
+        assert_eq!(large, 4 * small);
     }
 
     #[test]
