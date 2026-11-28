@@ -297,7 +297,7 @@ fn simulate_one_shot_with_trace(
                     pre_measure_statevector,
                 });
             }
-            Gate::RESET(q) => reset_qubit(&mut state, *q),
+            Gate::RESET(q) => reset_qubit(&mut state, *q, &mut rng),
             Gate::IF(params) => {
                 if classical[params.cbit] == params.value {
                     apply_noisy_unitary(&mut state, &params.gate, noise, &mut rng);
@@ -370,8 +370,23 @@ fn collapse_z(state: &mut DenseTnState, qubit: usize, outcome: u8) {
     normalize_dense(state);
 }
 
-fn reset_qubit(state: &mut DenseTnState, qubit: usize) {
-    collapse_z(state, qubit, 0);
+/// RESET discards the qubit's value (zk-STARK §6.5: the state-vector leaf
+/// swaps it into an ancilla that is traced out). On one trajectory that is a
+/// measurement whose outcome is drawn from the shot's RNG and not recorded,
+/// then an X when it read 1. Projecting onto |0⟩ instead would post-select:
+/// it changes the other qubits' distribution, and leaves no state at all
+/// when the qubit is |1⟩.
+fn reset_qubit(state: &mut DenseTnState, qubit: usize, rng: &mut StdRng) {
+    let (p0, p1) = z_marginal(state, qubit);
+    let outcome = if rng.gen::<f64>() < p0 / (p0 + p1).max(1e-30) {
+        0
+    } else {
+        1
+    };
+    collapse_z(state, qubit, outcome);
+    if outcome == 1 {
+        state.apply_gate(&Gate::X(qubit));
+    }
 }
 
 fn normalize_dense(state: &mut DenseTnState) {
@@ -389,6 +404,205 @@ fn normalize_dense(state: &mut DenseTnState) {
 mod tests {
     use super::*;
     use crate::engine::{Gate, IfParams};
+
+    /// Exact distribution of the classical register, branching on every
+    /// MEASURE and RESET outcome (circuit-payload §1, §2.1). Independent of
+    /// the trajectory code: it keeps every branch with its weight.
+    fn exact_distribution(
+        gates: &[Gate],
+        n: usize,
+        ncb: usize,
+    ) -> std::collections::BTreeMap<String, f64> {
+        let mut branches = vec![(DenseTnState::try_new(n).expect("dense"), vec![0u8; ncb])];
+        for gate in gates {
+            let mut next = Vec::new();
+            for (state, cbits) in branches {
+                let split = |q: usize| {
+                    (0..2u8)
+                        .map(|bit| {
+                            let mut s = DenseTnState {
+                                state: state.state.clone(),
+                                qubit_count: state.qubit_count,
+                            };
+                            for (i, a) in s.state.iter_mut().enumerate() {
+                                if ((i >> q) & 1) as u8 != bit {
+                                    *a = num_complex::Complex64::new(0.0, 0.0);
+                                }
+                            }
+                            (bit, s)
+                        })
+                        .filter(|(_, s)| s.state.iter().map(|a| a.norm_sqr()).sum::<f64>() > 1e-15)
+                        .collect::<Vec<_>>()
+                };
+                match gate {
+                    Gate::MEASURE(m) => {
+                        for (bit, s) in split(m.qubit) {
+                            let mut c = cbits.clone();
+                            c[m.cbit] = bit;
+                            next.push((s, c));
+                        }
+                    }
+                    Gate::RESET(q) => {
+                        for (bit, mut s) in split(*q) {
+                            if bit == 1 {
+                                s.apply_gate(&Gate::X(*q));
+                            }
+                            next.push((s, cbits.clone()));
+                        }
+                    }
+                    Gate::IF(p) => {
+                        let mut s = state;
+                        if cbits[p.cbit] == p.value {
+                            s.apply_gate(&p.gate);
+                        }
+                        next.push((s, cbits));
+                    }
+                    g => {
+                        let mut s = state;
+                        s.apply_gate(g);
+                        next.push((s, cbits));
+                    }
+                }
+            }
+            branches = next;
+        }
+        let mut dist = std::collections::BTreeMap::new();
+        for (state, cbits) in branches {
+            let weight: f64 = state.state.iter().map(|a| a.norm_sqr()).sum();
+            *dist
+                .entry(outcome_key_from_classical(&cbits))
+                .or_insert(0.0) += weight;
+        }
+        dist
+    }
+
+    /// The sampled counts are within 5.5 sigma of the exact distribution,
+    /// and no outcome of probability 0 is drawn.
+    fn assert_matches_exact(gates: &[Gate], n: usize, ncb: usize, shots: u64, label: &str) {
+        let want = exact_distribution(gates, n, ncb);
+        let got = sample_mid_circuit_measurements(gates, n, ncb, shots, 11, None)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(got.counts.values().sum::<u64>(), shots, "{label}");
+        let keys: std::collections::BTreeSet<_> = want.keys().chain(got.counts.keys()).collect();
+        for key in keys {
+            let p = want.get(key).copied().unwrap_or(0.0);
+            let c = got.counts.get(key).copied().unwrap_or(0) as f64;
+            if p < 1e-12 {
+                assert_eq!(c, 0.0, "{label}: outcome {key} has probability 0");
+                continue;
+            }
+            let sigma = (p * (1.0 - p) * shots as f64).sqrt().max(1e-6);
+            let z = (c - p * shots as f64).abs() / sigma;
+            assert!(
+                z < 5.5,
+                "{label}: outcome {key} p={p} count={c} ({z:.1} sigma)"
+            );
+        }
+    }
+
+    fn m(qubit: usize, cbit: usize) -> Gate {
+        Gate::MEASURE(MeasureParams { qubit, cbit })
+    }
+
+    /// RESET of an entangled qubit discards it: the partner stays 50:50
+    /// (projecting onto |0⟩ gave 0 every shot). RESET of a measured |1⟩
+    /// returns it to |0⟩ (projecting left no state, then 1 or an error).
+    #[test]
+    fn reset_discards_the_qubit_instead_of_post_selecting() {
+        let entangled = [Gate::H(0), Gate::CNOT(0, 1), Gate::RESET(0), m(1, 0)];
+        assert_matches_exact(&entangled, 2, 1, 4000, "H CNOT RESET M");
+        let partial = [Gate::RY(0, 1.2), Gate::CNOT(0, 1), Gate::RESET(0), m(1, 0)];
+        assert_matches_exact(&partial, 2, 1, 4000, "RY CNOT RESET M");
+        let measured_one = [Gate::X(0), m(0, 0), Gate::RESET(0), m(0, 1)];
+        let got = sample_mid_circuit_measurements(&measured_one, 1, 2, 200, 3, None)
+            .expect("X M RESET M");
+        assert_eq!(got.counts.get("01"), Some(&200), "{:?}", got.counts);
+        let unmeasured_one = [Gate::X(0), Gate::RESET(0), Gate::H(0), m(0, 0)];
+        assert_matches_exact(&unmeasured_one, 1, 1, 4000, "X RESET H M");
+    }
+
+    /// Seeded random mid-circuit circuits (MEASURE, RESET, IF, every unitary
+    /// gate; measured qubits frozen until RESET) match the exact distribution.
+    #[test]
+    fn random_mid_circuits_match_the_exact_distribution() {
+        use rand::Rng;
+        let mut rng = StdRng::seed_from_u64(0x0d1d_2026_1128);
+        for case in 0..40 {
+            let n = rng.gen_range(1..=4usize);
+            let ncb = rng.gen_range(1..=n.min(3) + 1);
+            let mut frozen = vec![false; n];
+            let mut measured_any = false;
+            let mut gates = Vec::new();
+            for _ in 0..rng.gen_range(2..=14) {
+                let live: Vec<usize> = (0..n).filter(|&q| !frozen[q]).collect();
+                let k: f64 = rng.gen();
+                let unitary = |rng: &mut StdRng| -> Gate {
+                    let pick = |rng: &mut StdRng, not: &[usize]| loop {
+                        let w = live[rng.gen_range(0..live.len())];
+                        if !not.contains(&w) {
+                            break w;
+                        }
+                    };
+                    let q = pick(rng, &[]);
+                    let j: f64 = rng.gen();
+                    if live.len() >= 3 && j < 0.08 {
+                        let b = pick(rng, &[q]);
+                        let t = pick(rng, &[q, b]);
+                        Gate::CCNOT(q, b, t)
+                    } else if live.len() >= 2 && j < 0.35 {
+                        let t = pick(rng, &[q]);
+                        if rng.gen() {
+                            Gate::CNOT(q, t)
+                        } else {
+                            Gate::CZ(q, t)
+                        }
+                    } else if j < 0.65 {
+                        let theta = rng.gen_range(-7.0..7.0);
+                        match rng.gen_range(0..3) {
+                            0 => Gate::RX(q, theta),
+                            1 => Gate::RY(q, theta),
+                            _ => Gate::RZ(q, theta),
+                        }
+                    } else {
+                        match rng.gen_range(0..6) {
+                            0 => Gate::H(q),
+                            1 => Gate::X(q),
+                            2 => Gate::Y(q),
+                            3 => Gate::Z(q),
+                            4 => Gate::S(q),
+                            _ => Gate::T(q),
+                        }
+                    }
+                };
+                if k < 0.2 && !live.is_empty() {
+                    let q = live[rng.gen_range(0..live.len())];
+                    gates.push(m(q, rng.gen_range(0..ncb)));
+                    frozen[q] = true;
+                    measured_any = true;
+                } else if k < 0.32 {
+                    let q = rng.gen_range(0..n);
+                    gates.push(Gate::RESET(q));
+                    frozen[q] = false;
+                } else if k < 0.44 && measured_any && !live.is_empty() {
+                    let g = unitary(&mut rng);
+                    gates.push(Gate::IF(IfParams {
+                        cbit: rng.gen_range(0..ncb),
+                        value: rng.gen_range(0..2),
+                        gate: Box::new(g),
+                    }));
+                } else if !live.is_empty() {
+                    let g = unitary(&mut rng);
+                    gates.push(g);
+                }
+            }
+            for (q, &is_frozen) in frozen.iter().enumerate() {
+                if !is_frozen {
+                    gates.push(m(q, rng.gen_range(0..ncb)));
+                }
+            }
+            assert_matches_exact(&gates, n, ncb, 4000, &format!("case {case}: {gates:?}"));
+        }
+    }
 
     #[test]
     fn mid_circuit_measure_then_conditional_x() {
