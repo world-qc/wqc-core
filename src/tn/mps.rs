@@ -666,6 +666,13 @@ impl MpsState {
         self.apply_two_qubit_gate(c1, t, &super::gates::cnot_matrix())?;
         self.apply_one_qubit(t, &unary_matrix(&Gate::T(t)));
         self.apply_one_qubit(t, &unary_matrix(&Gate::H(t)));
+        // The steps above are a Toffoli only up to a phase on the controls;
+        // these restore it (Nielsen & Chuang, Fig. 4.9).
+        self.apply_one_qubit(c2, &unary_matrix(&Gate::T(c2)));
+        self.apply_two_qubit_gate(c1, c2, &super::gates::cnot_matrix())?;
+        self.apply_one_qubit(c1, &unary_matrix(&Gate::T(c1)));
+        self.apply_one_qubit(c2, &tdg);
+        self.apply_two_qubit_gate(c1, c2, &super::gates::cnot_matrix())?;
         Ok(())
     }
 
@@ -1007,7 +1014,8 @@ fn rsvd_sites(
     #[cfg(not(feature = "webgpu"))]
     let b = matmul(ell, rows, cols, &qh, mat);
     let bmat = DMatrix::from_row_slice(ell, cols, &b);
-    let svd = bmat.svd(true, true);
+    // A failed check takes the exact split below.
+    let svd = super::svd_guard::checked_svd(bmat).ok()?;
     let mut values: Vec<f64> = svd.singular_values.iter().copied().collect();
     // Oversampled modes of an exact gap land around 1e-15. The GPU cutoff
     // band is 1e-10 wide and would treat that dust as an ambiguous cut.
@@ -1122,7 +1130,7 @@ fn truncated_svd_split(
 ) -> Result<(Array3<Complex64>, Array3<Complex64>), EngineError> {
     let rows = mat.nrows();
     let cols = mat.ncols();
-    let svd = mat.svd(true, true);
+    let svd = super::svd_guard::checked_svd(mat).map_err(EngineError::ExecutionFailed)?;
     let singular = svd.singular_values;
     let values: Vec<f64> = singular.iter().copied().collect();
     let chi = super::svd_guard::retained_chi(&values, max_bond, rows, cols);
@@ -1878,5 +1886,229 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_gate_tests {
+    use super::*;
+    use crate::tn::dense::DenseTnState;
+
+    fn spread(n: usize, phase: f64) -> Vec<Gate> {
+        let mut gates = Vec::new();
+        for q in 0..n {
+            gates.push(Gate::RY(q, 0.3 + 0.4 * q as f64 + phase));
+            gates.push(Gate::RZ(q, 0.7 - 0.2 * q as f64 + phase));
+        }
+        gates
+    }
+
+    fn max_diff(n: usize, gates: &[Gate]) -> f64 {
+        let mut mps = MpsState::try_new_with_bond(n, 128).expect("mps");
+        let mut dense = DenseTnState::try_new(n).expect("dense");
+        for g in gates {
+            mps.apply_gate(g).expect("mps gate");
+            dense.apply_gate(g);
+        }
+        mps.to_dense_state()
+            .iter()
+            .zip(dense.state.iter())
+            .map(|(a, b)| (a - b).norm())
+            .fold(0.0, f64::max)
+    }
+
+    /// Random circuits of every unitary gate type, 1 to 6 qubits, match the
+    /// dense state amplitude by amplitude. Seeded, so a failure reproduces.
+    #[test]
+    fn random_circuits_match_dense() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(0x5eed_2026_1128);
+        for case in 0..300 {
+            let n = rng.gen_range(1..=6usize);
+            let depth = rng.gen_range(1..=24usize);
+            let mut gates = Vec::with_capacity(depth);
+            for _ in 0..depth {
+                let k: f64 = rng.gen();
+                let q = rng.gen_range(0..n);
+                let other = |rng: &mut StdRng, not: &[usize]| loop {
+                    let w = rng.gen_range(0..n);
+                    if !not.contains(&w) {
+                        break w;
+                    }
+                };
+                let gate = if n >= 3 && k < 0.08 {
+                    let c2 = other(&mut rng, &[q]);
+                    let t = other(&mut rng, &[q, c2]);
+                    Gate::CCNOT(q, c2, t)
+                } else if n >= 2 && k < 0.35 {
+                    let t = other(&mut rng, &[q]);
+                    if rng.gen() {
+                        Gate::CNOT(q, t)
+                    } else {
+                        Gate::CZ(q, t)
+                    }
+                } else if k < 0.65 {
+                    let theta = rng.gen_range(-7.0..7.0);
+                    match rng.gen_range(0..3) {
+                        0 => Gate::RX(q, theta),
+                        1 => Gate::RY(q, theta),
+                        _ => Gate::RZ(q, theta),
+                    }
+                } else {
+                    match rng.gen_range(0..6) {
+                        0 => Gate::H(q),
+                        1 => Gate::X(q),
+                        2 => Gate::Y(q),
+                        3 => Gate::Z(q),
+                        4 => Gate::S(q),
+                        _ => Gate::T(q),
+                    }
+                };
+                gates.push(gate);
+            }
+            let d = max_diff(n, &gates);
+            assert!(d < 1e-9, "case {case}, n={n}: max diff {d} for {gates:?}");
+        }
+    }
+
+    /// The MPS CCNOT is the Toffoli in every wire order, on states where a
+    /// phase on the controls would show (real rotations alone hide it).
+    #[test]
+    fn mps_ccnot_matches_dense_in_every_order() {
+        for n in 3..=5 {
+            for c1 in 0..n {
+                for c2 in 0..n {
+                    for t in 0..n {
+                        if c1 == c2 || c1 == t || c2 == t {
+                            continue;
+                        }
+                        let mut gates = spread(n, 0.1);
+                        gates.push(Gate::CCNOT(c1, c2, t));
+                        gates.extend(spread(n, -0.25));
+                        let d = max_diff(n, &gates);
+                        assert!(d < 1e-10, "n={n} CCNOT({c1},{c2},{t}): max diff {d}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The 2x2 split nalgebra's complex SVD got wrong (top singular value
+    /// 1.00795 on a matrix of norm 1, weight on the zero row): the checked
+    /// split reproduces it.
+    #[test]
+    fn checked_svd_reproduces_the_matrix_nalgebra_got_wrong() {
+        let m = DMatrix::<Complex64>::from_row_slice(
+            2,
+            2,
+            &[
+                Complex64::new(4.143_568_649_678_201_6e-16, 0.0),
+                Complex64::new(0.0, -1.597_611_177_955_782e-16),
+                Complex64::new(0.0, -0.359_750_055_286_23),
+                Complex64::new(0.933_048_711_333_741_1, 0.0),
+            ],
+        );
+        let svd = crate::tn::svd_guard::checked_svd(m.clone()).expect("checked svd");
+        assert!(
+            (svd.singular_values[0] - 1.0).abs() < 1e-12,
+            "top singular value {}",
+            svd.singular_values[0]
+        );
+        let u = svd.u.expect("u");
+        let v_t = svd.v_t.expect("v_t");
+        let mut sigma = DMatrix::<Complex64>::zeros(2, 2);
+        for k in 0..2 {
+            sigma[(k, k)] = Complex64::new(svd.singular_values[k], 0.0);
+        }
+        let err = (u * sigma * v_t - m)
+            .iter()
+            .map(|c| c.norm())
+            .fold(0.0, f64::max);
+        assert!(err < 1e-12, "rebuild error {err}");
+    }
+
+    /// The Jacobi fallback factors tall, wide and rank-deficient complex
+    /// matrices to f64 accuracy.
+    #[test]
+    fn jacobi_svd_reproduces_tall_wide_and_rank_deficient() {
+        let entry = |r: usize, c: usize, k: f64| {
+            let t = (r * 7 + c * 3) as f64 * 0.37 + k;
+            Complex64::new(t.sin(), (1.3 * t).cos())
+        };
+        for (rows, cols) in [(4, 4), (6, 3), (3, 6), (8, 8)] {
+            let full = DMatrix::<Complex64>::from_fn(rows, cols, |r, c| entry(r, c, 0.0));
+            // Rank 1: an outer product.
+            let rank1 = DMatrix::<Complex64>::from_fn(rows, cols, |r, c| {
+                entry(r, 0, 0.2) * entry(0, c, 0.9)
+            });
+            for m in [full, rank1] {
+                let svd = crate::tn::svd_guard::jacobi_svd(&m);
+                let s = &svd.singular_values;
+                assert!(
+                    s.as_slice().windows(2).all(|w| w[0] >= w[1]),
+                    "not descending: {s:?}"
+                );
+                let u = svd.u.expect("u");
+                let v_t = svd.v_t.expect("v_t");
+                let k = s.len();
+                let mut sigma = DMatrix::<Complex64>::zeros(k, k);
+                for j in 0..k {
+                    sigma[(j, j)] = Complex64::new(s[j], 0.0);
+                }
+                let err = (u.columns(0, k) * sigma * v_t.rows(0, k) - &m)
+                    .iter()
+                    .map(|c| c.norm())
+                    .fold(0.0, f64::max);
+                assert!(err < 1e-12, "{rows}x{cols}: rebuild error {err}");
+            }
+        }
+    }
+
+    /// How often nalgebra's split fails its check on an ordinary circuit, and
+    /// whether the MPS still matches the dense state.
+    #[test]
+    fn brickwork_matches_dense_and_reports_svd_fallbacks() {
+        use std::sync::atomic::Ordering::Relaxed;
+        for (n, depth) in [(6usize, 6usize), (8, 8)] {
+            let before = (
+                crate::tn::svd_guard::SVD_RETRIES.load(Relaxed),
+                crate::tn::svd_guard::SVD_JACOBI.load(Relaxed),
+            );
+            let mut gates = Vec::new();
+            for layer in 0..depth {
+                for q in 0..n {
+                    gates.push(Gate::RY(q, 0.17 + 0.03 * (q + layer) as f64));
+                    gates.push(Gate::RZ(q, 0.4 - 0.05 * q as f64));
+                }
+                for q in (layer % 2..n - 1).step_by(2) {
+                    gates.push(Gate::CNOT(q, q + 1));
+                }
+            }
+            let d = max_diff(n, &gates);
+            let after = (
+                crate::tn::svd_guard::SVD_RETRIES.load(Relaxed),
+                crate::tn::svd_guard::SVD_JACOBI.load(Relaxed),
+            );
+            eprintln!(
+                "n={n} depth={depth}: max diff {d:e}, retries {}, jacobi {}",
+                after.0 - before.0,
+                after.1 - before.1
+            );
+            assert!(d < 1e-9, "n={n}: max diff {d}");
+        }
+    }
+
+    /// The circuit that reached that split: qubit 0 stays |1⟩, so ⟨00|ψ⟩ is 0.
+    #[test]
+    fn mps_keeps_an_exact_zero_through_a_rank_one_split() {
+        let gates = vec![
+            Gate::X(0),
+            Gate::CZ(1, 0),
+            Gate::RX(1, -0.736),
+            Gate::CZ(1, 0),
+            Gate::CNOT(0, 1),
+            Gate::CZ(1, 0),
+        ];
+        assert!(max_diff(2, &gates) < 1e-12);
     }
 }
