@@ -541,7 +541,8 @@ impl SweepBuilder {
         Ok(())
     }
 
-    /// Same decomposition as `MpsState::apply_ccnot`.
+    /// Same decomposition as `MpsState::apply_ccnot`, including the controls'
+    /// phase correction (Nielsen & Chuang, Fig. 4.9).
     fn ccnot(&mut self, c1: usize, c2: usize, tgt: usize, gate: u32) -> Result<(), EngineError> {
         self.decomp_unary(tgt, gate, DecompUnary::H);
         self.two_qubit(c2, tgt, gate, PairKind::CcnotCnot)?;
@@ -553,6 +554,11 @@ impl SweepBuilder {
         self.two_qubit(c1, tgt, gate, PairKind::CcnotCnot)?;
         self.decomp_unary(tgt, gate, DecompUnary::T);
         self.decomp_unary(tgt, gate, DecompUnary::H);
+        self.decomp_unary(c2, gate, DecompUnary::T);
+        self.two_qubit(c1, c2, gate, PairKind::CcnotCnot)?;
+        self.decomp_unary(c1, gate, DecompUnary::T);
+        self.decomp_unary(c2, gate, DecompUnary::Tdg);
+        self.two_qubit(c1, c2, gate, PairKind::CcnotCnot)?;
         Ok(())
     }
 
@@ -988,6 +994,37 @@ mod tests {
         assert_eq!(tree_trace.len(), slice_trace.len());
         for (got, expected) in tree_trace.iter().zip(&slice_trace) {
             assert!((got - expected).abs() < 1e-12, "{got} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn sweep_tree_ccnot_matches_dense_in_every_order() {
+        // RY before and after the CCNOT makes a phase on the controls change
+        // the |0…0⟩ amplitude, so a Toffoli up to a phase does not pass.
+        for n in 3..=4usize {
+            let chi = exact_bond_dim(n);
+            let orders: [Vec<u32>; 2] = [Vec::new(), (0..n as u32).rev().collect()];
+            for c1 in 0..n {
+                for c2 in 0..n {
+                    for t in 0..n {
+                        if c1 == c2 || c1 == t || c2 == t {
+                            continue;
+                        }
+                        let mut gates: Vec<Gate> =
+                            (0..n).map(|q| Gate::RY(q, 0.4 + 0.3 * q as f64)).collect();
+                        gates.push(Gate::CCNOT(c1, c2, t));
+                        gates.extend((0..n).map(|q| Gate::RY(q, -0.7 + 0.2 * q as f64)));
+                        let want = dense_zero(n, &gates);
+                        for order in &orders {
+                            let tree = sweep_tree(n, &gates, order).expect("tree");
+                            let mut mps = MpsState::try_new_with_bond(n, chi).expect("mps");
+                            let got =
+                                contract_tree_amplitude(n, &gates, &tree, &mut mps).expect("tree");
+                            assert_close(got, want, 1e-10);
+                        }
+                    }
+                }
+            }
         }
     }
 

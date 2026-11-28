@@ -1917,6 +1917,60 @@ mod exact_gate_tests {
             .fold(0.0, f64::max)
     }
 
+    /// Random circuits of every unitary gate type, 1 to 6 qubits, match the
+    /// dense state amplitude by amplitude. Seeded, so a failure reproduces.
+    #[test]
+    fn random_circuits_match_dense() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(0x5eed_2026_1128);
+        for case in 0..300 {
+            let n = rng.gen_range(1..=6usize);
+            let depth = rng.gen_range(1..=24usize);
+            let mut gates = Vec::with_capacity(depth);
+            for _ in 0..depth {
+                let k: f64 = rng.gen();
+                let q = rng.gen_range(0..n);
+                let other = |rng: &mut StdRng, not: &[usize]| loop {
+                    let w = rng.gen_range(0..n);
+                    if !not.contains(&w) {
+                        break w;
+                    }
+                };
+                let gate = if n >= 3 && k < 0.08 {
+                    let c2 = other(&mut rng, &[q]);
+                    let t = other(&mut rng, &[q, c2]);
+                    Gate::CCNOT(q, c2, t)
+                } else if n >= 2 && k < 0.35 {
+                    let t = other(&mut rng, &[q]);
+                    if rng.gen() {
+                        Gate::CNOT(q, t)
+                    } else {
+                        Gate::CZ(q, t)
+                    }
+                } else if k < 0.65 {
+                    let theta = rng.gen_range(-7.0..7.0);
+                    match rng.gen_range(0..3) {
+                        0 => Gate::RX(q, theta),
+                        1 => Gate::RY(q, theta),
+                        _ => Gate::RZ(q, theta),
+                    }
+                } else {
+                    match rng.gen_range(0..6) {
+                        0 => Gate::H(q),
+                        1 => Gate::X(q),
+                        2 => Gate::Y(q),
+                        3 => Gate::Z(q),
+                        4 => Gate::S(q),
+                        _ => Gate::T(q),
+                    }
+                };
+                gates.push(gate);
+            }
+            let d = max_diff(n, &gates);
+            assert!(d < 1e-9, "case {case}, n={n}: max diff {d} for {gates:?}");
+        }
+    }
+
     /// The MPS CCNOT is the Toffoli in every wire order, on states where a
     /// phase on the controls would show (real rotations alone hide it).
     #[test]

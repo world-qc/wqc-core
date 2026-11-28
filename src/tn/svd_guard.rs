@@ -102,6 +102,13 @@ pub fn checked_svd(mut mat: DMatrix<Complex64>) -> Result<SVD<Complex64, Dyn, Dy
     }
     #[cfg(test)]
     SVD_RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Rare (none on the brickwork tests or testnet so far); logged so its
+    // rate and the Jacobi fallback's cost can be watched.
+    eprintln!(
+        "svd: nalgebra failed the check on a {}x{} matrix; retrying",
+        mat.nrows(),
+        mat.ncols()
+    );
     let t = mat.transpose().svd(true, true);
     if let (Some(u_t), Some(v_t_t)) = (t.u.as_ref(), t.v_t.as_ref()) {
         let flipped = SVD {
@@ -115,6 +122,11 @@ pub fn checked_svd(mut mat: DMatrix<Complex64>) -> Result<SVD<Complex64, Dyn, Dy
     }
     #[cfg(test)]
     SVD_JACOBI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "svd: transpose failed too on a {}x{} matrix; using Jacobi",
+        mat.nrows(),
+        mat.ncols()
+    );
     let jacobi = jacobi_svd(&mat);
     if svd_reproduces(&mat, &jacobi) {
         return Ok(jacobi);
@@ -216,13 +228,17 @@ pub fn jacobi_svd(a: &DMatrix<Complex64>) -> SVD<Complex64, Dyn, Dyn> {
     }
 }
 
-/// Relative tolerance of [`svd_reproduces`]; a correct f64 SVD is near 1e-15.
+/// Relative tolerance of [`svd_reproduces`]. A correct f64 SVD is near 1e-15,
+/// so this is a safety net that only rejects clearly broken factorizations;
+/// the accuracy of an accepted one is the SVD's own.
 const SVD_CHECK_TOL: f64 = 1e-9;
 
 /// Whether `svd` is a factorization of `a`: singular values finite,
 /// non-negative and descending with `Σσ² = ‖A‖F²`, and `U·Σ·Vᴴ·x = A·x` for
-/// two fixed probe vectors (a Freivalds check, O(rows·cols) instead of a
-/// full rebuild).
+/// two fixed probe vectors (Freivalds-style, O(rows·cols) instead of a full
+/// rebuild). The probes are fixed, not random, so this is a strong heuristic
+/// rather than a proof; with the norm check it catches the failures seen
+/// (a top singular value above the norm, a norm deficit).
 fn svd_reproduces(a: &DMatrix<Complex64>, svd: &SVD<Complex64, Dyn, Dyn>) -> bool {
     let (Some(u), Some(v_t)) = (svd.u.as_ref(), svd.v_t.as_ref()) else {
         return false;
