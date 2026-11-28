@@ -848,7 +848,7 @@ fn cpu_truncated_sites(
             }
         }
     }
-    let svd = mat.svd(true, true);
+    let svd = crate::tn::svd_guard::checked_svd(mat).map_err(EngineError::ExecutionFailed)?;
     let values: Vec<f64> = svd.singular_values.iter().copied().collect();
     let chi = retained_chi(&values, max_bond, rows, cols);
     let u = svd
